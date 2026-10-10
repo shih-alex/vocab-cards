@@ -1,0 +1,30 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content">
+<meta name="theme-color" content="#FAFAF9" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#141416" media="(prefers-color-scheme: dark)">
+<meta name="color-scheme" content="light dark">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="單字卡">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<meta name="format-detection" content="telephone=no">
+<meta name="description" content="英文單字字卡：匯入文字檔，翻卡背單字，再用選擇題和拼字題測驗自己。">
+<title>單字卡</title>
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icons/icon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div id="app" aria-live="off"></div>
+<div id="toasts" role="status" aria-live="polite"></div>
+<noscript><p class="noscript">請開啟瀏覽器的 JavaScript 才能使用單字卡。</p></noscript>
+<script src="core.js"></script>
+<script src="sample.js"></script>
+<script src="app.js"></script>
+<script id="boot-check">if (!window.VCApp) document.getElementById('app').innerHTML = '<div class="fatal"><h1>單字卡</h1><p>程式檔沒有載入完整。請連上網路後重新整理（或把 App 關掉再打開）。</p></div>';</script>
+</body>
+</html>

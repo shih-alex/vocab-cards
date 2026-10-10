@@ -1,0 +1,1116 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>core.js tests</title>
+<style>
+  body { margin: 16px; background: #FAFAF9; color: #1F2328;
+         font: 13px/1.55 ui-monospace, Consolas, "Microsoft JhengHei", monospace; }
+  h1 { font-size: 16px; margin: 0 0 8px; }
+  #out { white-space: pre-wrap; margin: 0; }
+  #out.pass { color: #2E6B3A; }
+  #out.fail { color: #9B1C1C; }
+</style>
+</head>
+<body>
+<h1>單字卡 core.js</h1>
+<pre id="out">RUNNING</pre>
+<script src="../core.js"></script>
+<script>
+(function () {
+  'use strict';
+
+  /* ---------------------------------------------------------------- harness */
+  let pass = 0;
+  let fail = 0;
+  let current = '';
+  const failures = [];
+
+  function stable(v) {
+    if (v === undefined) return 'undefined';
+    if (typeof v === 'number' && !isFinite(v)) return String(v);
+    if (v === null || typeof v !== 'object') return JSON.stringify(v);
+    if (Array.isArray(v)) return '[' + v.map(stable).join(',') + ']';
+    return '{' + Object.keys(v).sort().map(k => JSON.stringify(k) + ':' + stable(v[k])).join(',') + '}';
+  }
+  function record(okay, label, detail) {
+    if (okay) { pass++; return; }
+    fail++;
+    failures.push({ name: current, label: label || '', detail: detail || '' });
+  }
+  function eq(actual, expected, label) {
+    const a = stable(actual);
+    const b = stable(expected);
+    record(a === b, label, 'expected: ' + b + '\n    actual:   ' + a);
+  }
+  function ok(cond, label, detail) { record(!!cond, label, detail || 'condition is false'); }
+  function throws(fn, label) {
+    let threw = false;
+    try { fn(); } catch (e) { threw = true; }
+    record(threw, label, 'expected an exception');
+  }
+  function test(name, fn) {
+    current = name;
+    try { fn(); } catch (e) { record(false, 'threw', String(e && e.stack || e)); }
+  }
+
+  /* ---------------------------------------------------------------- helpers */
+  const NO_SEP = '找不到「|」分隔符號，也沒有中文意思';
+
+  const parse = (text, name = 'Default') => VC.parseDeckText(text, { defaultDeckName: name });
+  const F = (word, phonetic, meaning, example = '', exampleZh = '', note = '') =>
+    ({ word, phonetic, meaning, example, exampleZh, note });
+  const fields = c => c ? F(c.word, c.phonetic, c.meaning, c.example, c.exampleZh, c.note) : c;
+  const one = text => {
+    const r = parse(text);
+    return r.decks.length ? fields(r.decks[0].cards[0]) : { errors: r.errors };
+  };
+  const errOf = text => { const r = parse(text); return r.errors.length ? r.errors[0].reason : null; };
+  const words = deck => deck.cards.map(c => c.word);
+  // A card as stored by the app: C('c1', 'abandon', 'v. 放棄', { example: '…' }).
+  const C = (id, word, meaning, extra) => Object.assign(VC.newCard({ word, meaning }, 'd1', 0, id, 0), extra);
+  const RNG = seed => VC.seededRng(seed);
+
+  function run() {
+  /* ================================================================ parser */
+
+  test('contract: VC exists with every function', () => {
+    ok(typeof VC === 'object', 'window.VC defined');
+    ['parseDeckText', 'serializeDeck', 'decodeBytes', 'normalizeWord', 'newCard', 'wordForms', 'headwordRegex',
+     'findHeadword', 'maskWord', 'makeCloze', 'checkSpelling', 'posOf', 'meaningKey', 'shuffle', 'seededRng',
+     'pickChoices', 'buildQuiz', 'quizEligible']
+      .forEach(fn => ok(typeof VC[fn] === 'function', 'VC.' + fn));
+    eq(VC.version, '2.0', 'VC.version');
+    eq(VC.DEFAULT_DECK_SETTINGS, { direction: 'en2zh' }, 'DEFAULT_DECK_SETTINGS');
+    ['SRS', 'answer', 'previewLabels', 'formatInterval', 'formatDays', 'dueLabel', 'deckCounts', 'nextCard',
+     'dayKey', 'dayStart', 'addDays']
+      .forEach(name => ok(!(name in VC), 'v1 SRS API removed: VC.' + name));
+  });
+
+  test('parse: spec example file', () => {
+    const r = parse([
+      '#deck: 高中英文 Level 1',
+      '# 以 # 開頭（但不是 #deck:）的行是註解，會被忽略',
+      'abandon | /əˈbændən/ | v. 放棄；拋棄 | He abandoned his car in the snow. | 他把車丟在雪地裡。',
+      'ability | n. 能力 | She has the ability to learn fast. | 她有快速學習的能力。',
+      'absent | adj. 缺席的',
+    ].join('\n'));
+    eq(r.errors, [], 'no errors');
+    eq(r.decks.length, 1, 'one deck');
+    eq(r.decks[0].name, '高中英文 Level 1', 'deck name');
+    eq(r.decks[0].cards.map(fields), [
+      F('abandon', '/əˈbændən/', 'v. 放棄；拋棄', 'He abandoned his car in the snow.', '他把車丟在雪地裡。'),
+      F('ability', '', 'n. 能力', 'She has the ability to learn fast.', '她有快速學習的能力。'),
+      F('absent', '', 'adj. 缺席的'),
+    ], 'cards');
+    eq(r.decks[0].cards.map(c => c.line), [3, 4, 5], 'line numbers');
+    eq(Object.keys(r.decks[0].cards[0]).sort(),
+       ['example', 'exampleZh', 'line', 'meaning', 'note', 'phonetic', 'word'], 'card keys');
+  });
+
+  test('parse: separators (TAB, |, trimming, trailing empties)', () => {
+    eq(one('apple\tn. 蘋果\tAn apple a day.\t一天一蘋果'), F('apple', '', 'n. 蘋果', 'An apple a day.', '一天一蘋果'), 'TAB');
+    eq(one('either|or\t二選一'), F('either|or', '', '二選一'), 'TAB wins over |');
+    eq(one('  cat   |   n. 貓  '), F('cat', '', 'n. 貓'), 'pipe fields trimmed');
+    eq(one(' dog \t n. 狗 '), F('dog', '', 'n. 狗'), 'TAB fields trimmed');
+    eq(one('egg\tn. 蛋\t\t\t'), F('egg', '', 'n. 蛋'), 'trailing empty TAB fields');
+    eq(one('fig | n. 無花果 | |'), F('fig', '', 'n. 無花果'), 'trailing empty pipe fields');
+    eq(one('fox\t"n. 狐狸, 狡猾的人"\t"He said ""hi""."'), F('fox', '', 'n. 狐狸, 狡猾的人', 'He said "hi".'),
+       'Excel-style quoted TAB fields');
+  });
+
+  test('parse: phonetic only in field 2', () => {
+    eq(one('cat | [kæt] | n. 貓 | I have a cat. | 我有一隻貓。'), F('cat', '[kæt]', 'n. 貓', 'I have a cat.', '我有一隻貓。'), '[…]');
+    eq(one('abandon | [əˋbændən] | v. 放棄'), F('abandon', '[əˋbændən]', 'v. 放棄'), 'KK brackets');
+    eq(one('data | /ˈdeɪtə/, /ˈdætə/ | n. 資料'), F('data', '/ˈdeɪtə/, /ˈdætə/', 'n. 資料'), 'two pronunciations');
+    eq(one('tone | n. 語氣 | /toʊn/'), F('tone', '', 'n. 語氣', '/toʊn/'), 'not detected in field 3');
+    eq(one('/slash/ | 斜線'), F('/slash/', '', '斜線'), 'not detected in field 1');
+    eq(one('data | /ˈdeɪtə/ n. | 資料'), F('data', '/ˈdeɪtə/ n.', '資料'), 'a labelled /…/ before the Chinese meaning (P1)');
+    eq(one('data | /ˈdeɪtə/ n. | data'), F('data', '', '/ˈdeɪtə/ n.', 'data'), 'labelled /…/ needs a Chinese field 3');
+    eq(one('w1 | /p/ | m | e | ez | note'), F('w1', '/p/', 'm', 'e', 'ez', 'note'), '6 fields with phonetic');
+    eq(one('w2 | m | e | ez | note'), F('w2', '', 'm', 'e', 'ez', 'note'), '5 fields without phonetic');
+    eq(one('w7 |  | m | e'), F('w7', '', 'm', 'e'), 'empty phonetic column is skipped');
+    eq(one('w8\t\tm\te\tez'), F('w8', '', 'm', 'e', 'ez'), 'empty phonetic TAB column is skipped');
+  });
+
+  test('parse: more than 6 fields go to note', () => {
+    eq(one('w3 | /p/ | m | e | ez | n1 | x1 | x2').note, 'n1 / x1 / x2', 'with phonetic');
+    eq(one('w4 | m | e | ez | n1 | x1').note, 'n1 / x1', 'without phonetic');
+    eq(one('w5 | m | e | ez |  | x1').note, 'x1', 'empty note + extra');
+    eq(one('w6\t/p/\tm\te\tez\tn\tx').note, 'n / x', 'TAB');
+  });
+
+  test('parse: #deck sections', () => {
+    const r = parse([
+      'apple | 蘋果',          // 1
+      '#deck: A',              // 2
+      'banana | 香蕉',         // 3
+      '# deck： B',            // 4  full-width colon
+      'cherry | 櫻桃',         // 5
+      '#DECK:C',               // 6
+      'date | 棗子',           // 7
+      '#Deck : Empty',         // 8
+      '#deck: A',              // 9  same name again → same deck
+      'egg | 蛋',              // 10
+    ].join('\n'));
+    eq(r.decks.map(d => d.name), ['Default', 'A', 'B', 'C'], 'names, empty section omitted');
+    eq(r.decks.map(words), [['apple'], ['banana', 'egg'], ['cherry'], ['date']], 'cards per deck');
+    eq(r.decks[1].cards.map(c => c.line), [3, 10], 'line numbers');
+    eq(parse('#deck：高中\nx | 叉').decks[0].name, '高中', 'full-width colon right after deck');
+    eq(parse('#deck:   多 個   空白  \nx | 叉').decks[0].name, '多 個 空白', 'name trimmed/collapsed');
+    eq(parse('a | 甲', 'MyFile').decks[0].name, 'MyFile', 'default deck name from caller');
+    const n = VC.parseDeckText('a | 甲').decks[0].name;
+    ok(typeof n === 'string' && n.length > 0, 'default name when opts missing', JSON.stringify(n));
+    eq(parse('#deck: X\nx | 叉\n#deck:\ny | 歪').decks.map(d => [d.name, words(d)]),
+       [['X', ['x']], ['Default', ['y']]], 'empty #deck: falls back to default');
+    eq(parse('#deck: Only comments\n# nothing here\n'), { decks: [], errors: [] }, 'zero-card section omitted');
+  });
+
+  test('parse: comments', () => {
+    const r = parse('# comment\n#separator:tab\n#html:true\n#deck column:3\n#notetype column:2\n   # indented\nzebra | 斑馬');
+    eq(r.errors, [], 'no errors');
+    eq(r.decks.map(d => [d.name, words(d)]), [['Default', ['zebra']]], 'only the card');
+  });
+
+  test('parse: escapes', () => {
+    eq(one('a\\|b | 甲\\n乙 | x\\ty | back\\\\slash'), F('a|b', '', '甲\n乙', 'x\ty', 'back\\slash'), '\\| \\n \\t \\\\');
+    eq(one('c\\\\|丙'), F('c\\', '', '丙'), 'escaped backslash before separator');
+    eq(one('C:\\path | 路徑'), F('C:\\path', '', '路徑'), 'unknown escape kept');
+    eq(one('rock\\|roll 搖滾'), F('rock|roll', '', '搖滾'), 'escaped | is not a separator');
+    eq(one('\\#tag | 標籤'), F('#tag', '', '標籤'), '\\# at line start');
+  });
+
+  test('parse: CJK fallback', () => {
+    eq(one('abandon 放棄'), F('abandon', '', '放棄'), 'space');
+    eq(one('abandon v. 放棄'), F('abandon', '', 'v. 放棄'), 'POS moved to meaning');
+    eq(one('abandon：放棄'), F('abandon', '', '放棄'), 'full-width colon');
+    eq(one('abandon - 放棄'), F('abandon', '', '放棄'), 'hyphen');
+    eq(one('abandon — 放棄'), F('abandon', '', '放棄'), 'em dash');
+    eq(one('apple=蘋果'), F('apple', '', '蘋果'), '=');
+    eq(one('apple, 蘋果'), F('apple', '', '蘋果'), 'comma');
+    eq(one('apple，蘋果'), F('apple', '', '蘋果'), 'full-width comma');
+    eq(one('eat - v. 吃'), F('eat', '', 'v. 吃'), 'separator before POS');
+    eq(one('record n./v. 紀錄；記錄'), F('record', '', 'n./v. 紀錄；記錄'), 'n./v.');
+    eq(one('record (n.) 紀錄'), F('record', '', '(n.) 紀錄'), '(n.)');
+    eq(one('plan n. v. 計畫'), F('plan', '', 'n. v. 計畫'), 'two POS tokens');
+    eq(one('look up phr. 查閱'), F('look up', '', 'phr. 查閱'), 'phrase');
+    eq(one('Happy Adj. 快樂的'), F('Happy', '', 'Adj. 快樂的'), 'POS case-insensitive');
+    eq(one('run vi. 跑'), F('run', '', 'vi. 跑'), 'vi.');
+    eq(one('abandon （動）放棄'), F('abandon', '', '（動）放棄'), 'full-width bracket stays with meaning');
+    eq(one('tiger 「老虎」'), F('tiger', '', '「老虎」'), '「」 stays with meaning');
+    eq(one('rare 㐀字'), F('rare', '', '㐀字'), 'CJK Extension A (U+3400)');
+    eq(one('compat 豈'), F('compat', '', '豈'), 'CJK compatibility (U+F900)');
+    eq(one('abandon /əˈbændən/ v. 放棄'), F('abandon', '/əˈbændən/', 'v. 放棄'), 'phonetic in English part');
+    eq(errOf('hello，world！'), NO_SEP, 'full-width punctuation is not a split point');
+    eq(errOf('hello world'), NO_SEP, 'no CJK, no separator');
+    eq(errOf('放棄 abandon'), '缺少單字', 'Chinese first → no word');
+  });
+
+  test('parse: header line skipped', () => {
+    ['word', 'words', 'term', 'front', 'english', '單字', '英文', '生字', 'WORD', 'English', 'Term']
+      .forEach(h => {
+        const r = parse(h + ' | 中文意思\nx | 叉');
+        eq([r.errors.length, r.decks.length && words(r.decks[0])], [0, ['x']], 'header "' + h + '"');
+      });
+    eq(words(parse('單字\t中文\nx\t叉').decks[0]), ['x'], 'TAB header');
+    eq(words(parse('Front\tBack\nx\t叉').decks[0]), ['x'], 'Front/Back');
+    eq(words(parse('x | 叉\nword | 字').decks[0]), ['x', 'word'], 'only the FIRST data line');
+    eq(words(parse('# c\n\nword | meaning\nx | 叉').decks[0]), ['x'], 'first data line after comments/blank');
+    eq(parse('a | 甲\n#deck: S\nenglish | 中文\nb | 乙').decks.map(words), [['a'], ['b']], 'per section');
+    const r = parse('Word Meaning\nx | 叉');
+    eq([r.errors, words(r.decks[0])], [[], ['x']], 'header without separators');
+  });
+
+  test('parse: HTML from Anki/Quizlet', () => {
+    eq(one('big<br>large\t<div>大的</div><div>巨大的</div>\t<b>Big</b> &amp; &lt;tall&gt; &quot;x&quot; &#39;y&#39;&nbsp;z'),
+       F('big\nlarge', '', '大的\n巨大的', 'Big & <tall> "x" \'y\' z'), 'br/div/tags/entities');
+    eq(one('a<br/>b<br />c | 甲').word, 'a\nb\nc', '<br/> and <br />');
+    eq(one('<span style="color:red">red</span> | <i>紅色</i>'), F('red', '', '紅色'), 'tags with attributes');
+    eq(one('less | a < b'), F('less', '', 'a < b'), 'lone < kept');
+    eq(one('amp | AT&T 公司').meaning, 'AT&T 公司', 'lone & kept');
+  });
+
+  test('parse: errors with line numbers', () => {
+    const r = parse([
+      'good | 好',         // 1
+      '',                  // 2
+      '# comment',         // 3
+      'nomeaning |',       // 4
+      ' | 沒有單字',       // 5
+      'hello world',       // 6
+      'onlyword',          // 7
+      'also good\t也好',   // 8
+    ].join('\n'));
+    eq(r.errors, [
+      { line: 4, text: 'nomeaning |', reason: '缺少中文意思' },
+      { line: 5, text: ' | 沒有單字', reason: '缺少單字' },
+      { line: 6, text: 'hello world', reason: NO_SEP },
+      { line: 7, text: 'onlyword', reason: NO_SEP },
+    ], 'errors');
+    eq(r.decks[0].cards.map(c => [c.word, c.line]), [['good', 1], ['also good', 8]], 'valid cards kept');
+  });
+
+  test('parse: line endings, BOM, empty input', () => {
+    const r = parse('a | 甲\r\nb | 乙\rc | 丙\n\nd | 丁');
+    eq(r.decks[0].cards.map(c => [c.word, c.line]), [['a', 1], ['b', 2], ['c', 3], ['d', 5]], 'CRLF / CR / LF');
+    eq(r.decks[0].cards[0].meaning, '甲', 'no stray \\r');
+    eq(one('\uFEFFa | 甲').word, 'a', 'BOM stripped');
+    eq(parse('\uFEFF#deck: B\nb | 乙').decks[0].name, 'B', 'BOM before #deck');
+    eq(parse(''), { decks: [], errors: [] }, 'empty');
+    eq(parse('\n\n  \n'), { decks: [], errors: [] }, 'blank lines only');
+  });
+
+  test('parse: Markdown tables (IMP-2)', () => {
+    const r = parse('| 單字 | 中文 |\n|---|---|\n| abandon | 放棄 |\n| ability | 能力 |');
+    eq(r.errors, [], 'no errors');
+    eq(r.decks.length && r.decks[0].cards.map(fields), [F('abandon', '', '放棄'), F('ability', '', '能力')], '2-column table');
+    eq(r.decks.length && r.decks[0].cards.map(c => c.line), [3, 4], 'line numbers');
+    const r2 = parse('| Word | IPA | Meaning | Example |\n| --- | :---: | --- | --- |\n| abandon | /əˈbændən/ | v. 放棄 | He abandoned it. |');
+    eq([r2.errors, r2.decks.length && r2.decks[0].cards.map(fields)], [[], [F('abandon', '/əˈbændən/', 'v. 放棄', 'He abandoned it.')]], '4-column table with IPA');
+    const r3 = parse('| # | 單字 | 詞性 | 中文 |\n|:-:|---|---|---|\n| 1 | **abandon** | v. | 放棄 |\n| 2 | ability | n. | 能力 |');
+    eq([r3.errors, r3.decks.length && r3.decks[0].cards.map(fields)], [[], [F('abandon', '', 'v. 放棄'), F('ability', '', 'n. 能力')]],
+       'number column, bold word, separate POS column');
+    eq(one('| cat | n. 貓 |'), F('cat', '', 'n. 貓'), 'a single row without a header');
+    const loose = parse('單字 | 中文\n--- | ---\nabandon | 放棄');
+    eq([loose.errors, loose.decks.length && words(loose.decks[0])], [[], ['abandon']], 'table without outer pipes');
+    eq(errOf('| | 沒有單字 |'), '缺少單字', 'empty first cell');
+  });
+
+  test('parse: text copied from an AI chat (IMP-2)', () => {
+    const r = parse([
+      '好的！以下是 4 個 Level 4 單字：',  // 1
+      '**Level 4 單字（共 30 個）**',         // 2
+      '- **abandon** /əˈbændən/ v. 放棄',     // 3
+      '1. **ability** (n.) 能力',            // 4
+      '---',                                 // 5
+      '* *absent* adj. 缺席的',              // 6
+      '~~~',                                 // 7  an unclosed fence with nothing in it
+    ].join('\n'));
+    eq(r.decks.map(d => [d.name, d.cards.map(fields)]), [['Default', [
+      F('abandon', '/əˈbændən/', 'v. 放棄'), F('ability', '', '(n.) 能力'), F('absent', '', 'adj. 缺席的')]]], 'cards without Markdown');
+    eq(r.errors.map(e => e.line), [1], 'only the chatty first line is reported');
+    eq(r.skipped, undefined, 'no code block with cards: every line is read');
+    const fenced = parse([
+      '好的！以下是 4 個 Level 4 單字：',  // 1
+      '```text',                             // 2
+      '#deck: Level 4',                      // 3
+      'absorb | /əbˈsɔrb/ | v. 吸收',        // 4
+      '```',                                 // 5
+      '- **abandon** 常和 oneself 連用。',    // 6
+    ].join('\n'));
+    eq([fenced.decks.map(d => [d.name, d.cards.map(fields)]), fenced.errors, fenced.skipped],
+       [[['Level 4', [F('absorb', '/əbˈsɔrb/', 'v. 吸收')]]], [], [1, 6]], 'with a ``` block only the block is read (P2)');
+    eq(one('word | **bold** and *italic* | __He__ left. | _翻譯_'), F('word', '', 'bold and italic', '__He__ left.', '翻譯'), 'emphasis inside fields');
+    eq(one('blank | 填空 | He ___ the car. | 他＿＿車。').example, 'He ___ the car.', 'fill-in blanks kept');
+    eq(one('times | 乘 | 2*3*4 = 24').example, '2*3*4 = 24', 'asterisks between digits kept');
+  });
+
+  test('parse: full-width separators and ＃ (IMP-1)', () => {
+    eq(one('abandon ｜ /əˈbændən/ ｜ v. 放棄 ｜ He abandoned his car. ｜ 他棄車。'),
+       F('abandon', '/əˈbændən/', 'v. 放棄', 'He abandoned his car.', '他棄車。'), '｜ U+FF5C');
+    eq(one('ability｜n. 能力｜She has the ability.｜她有能力。'), F('ability', '', 'n. 能力', 'She has the ability.', '她有能力。'), '｜ without spaces');
+    eq(one('abandon︱放棄'), F('abandon', '', '放棄'), '︱ U+FE31');
+    eq(one('abandon│放棄'), F('abandon', '', '放棄'), '│ U+2502');
+    eq(one('pipe | 直線｜全形'), F('pipe', '', '直線｜全形'), 'with an ASCII | a full-width one is just text');
+    const r = parse('#deck: A\na | 一\n＃deck： 全形井號\nd | 四\n＃ 這是註解');
+    eq([r.errors, r.decks.map(d => [d.name, words(d)])], [[], [['A', ['a']], ['全形井號', ['d']]]], '＃deck and ＃ comments');
+    eq(one('\\＃tag | 標籤').word, '＃tag', '\\＃ escape');
+  });
+
+  test('parse: list markers (IMP-3)', () => {
+    [['1. abandon 放棄', 'abandon'], ['2) ability 能力', 'ability'], ['1、absent 缺席的', 'absent'],
+     ['(3) absorb 吸收', 'absorb'], ['① accurate 準確的', 'accurate'], ['- abandon: 放棄', 'abandon'],
+     ['• ability 能力', 'ability'], ['* absent 缺席的', 'absent'], ['● accurate 準確的', 'accurate'],
+     ['1. abandon | v. 放棄', 'abandon'], ['1.\tabandon 放棄', 'abandon'], ['●\tability 能力', 'ability'],
+     ['12\tabandon\tv. 放棄', 'abandon']].forEach(([line, w]) => eq(one(line).word, w, JSON.stringify(line)));
+    eq(one('1.\tabandon 放棄').meaning, '放棄', 'Word numbered list: meaning');
+    eq(one('12\tabandon\tv. 放棄').meaning, 'v. 放棄', 'row-number column dropped');
+    eq(one('3D | 三維的').word, '3D', '3D untouched');
+    eq(one('-ish | 字尾：有點…的').word, '-ish', '-ish untouched');
+    eq(one('3.14 | 圓周率').word, '3.14', 'decimal number untouched');
+    eq(one('\\#hashtag | 主題標籤').word, '#hashtag', 'escaped # untouched');
+    eq(one('abandon | v. 放棄'), F('abandon', '', 'v. 放棄'), 'plain line unchanged');
+  });
+
+  test('parse: field 2 detection (IMP-6)', () => {
+    eq(one('abandon | əˈbændən | v. 放棄 | He abandoned it. | 他放棄了。'),
+       F('abandon', '/əˈbændən/', 'v. 放棄', 'He abandoned it.', '他放棄了。'), 'IPA without slashes');
+    eq(one('abandon\təˈbændən\tv. 放棄\tHe abandoned it.\t他放棄了。'),
+       F('abandon', '/əˈbændən/', 'v. 放棄', 'He abandoned it.', '他放棄了。'), 'IPA without slashes (TAB)');
+    eq(one('abandon | əˋbændən | v. 放棄'), F('abandon', '/əˋbændən/', 'v. 放棄'), 'KK without brackets');
+    eq(one('abandon | v. | 放棄 | He abandoned it.'), F('abandon', '', 'v. 放棄', 'He abandoned it.'), 'separate POS column');
+    eq(one('abandon | /əˈbændən/ | v. | 放棄'), F('abandon', '/əˈbændən/', 'v. 放棄'), 'phonetic + POS column');
+    eq(one('abandon\tadj\t放棄的'), F('abandon', '', 'adj. 放棄的'), 'POS without a dot');
+    eq(one('abandon | 動詞 | 放棄'), F('abandon', '', '動詞 放棄'), 'Chinese POS column');
+    eq(one('cool | [口語] 酷的 [美]'), F('cool', '', '[口語] 酷的 [美]'), 'bracketed Chinese is a meaning');
+    eq(one('slash | /斜線/ | example'), F('slash', '', '/斜線/', 'example'), 'slashed Chinese is a meaning');
+    eq(one('abandon\t[sound:abandon.mp3]\tv. 放棄'), F('abandon', '', 'v. 放棄'), 'Anki [sound:] tag removed');
+    eq(one('abandon | to leave behind | 放棄'), F('abandon', '', 'to leave behind', '放棄'), 'an English definition is not IPA');
+  });
+
+  test('parse: CSV files (IMP-8)', () => {
+    const csv = text => VC.parseDeckText(text, { defaultDeckName: 'Default', csv: true });
+    const r = csv('abandon,/əˈbændən/,v. 放棄,He abandoned his car in the snow.,他把車丟在雪地裡。\n' +
+      'ability,n. 能力,"She has the ability to learn fast, really.",她有快速學習的能力。\n' +
+      '"quote ""q""",n. 引號\nmake up,化妝，編造\n#deck: B\napple 蘋果');
+    eq(r.errors, [], 'no errors');
+    eq(r.decks.map(d => d.cards.map(fields)), [[
+      F('abandon', '/əˈbændən/', 'v. 放棄', 'He abandoned his car in the snow.', '他把車丟在雪地裡。'),
+      F('ability', '', 'n. 能力', 'She has the ability to learn fast, really.', '她有快速學習的能力。'),
+      F('quote "q"', '', 'n. 引號'), F('make up', '', '化妝，編造')], [F('apple', '', '蘋果')]],
+      'columns, quoted commas, "" escapes, full-width comma, a line without commas');
+    const multi = csv('word,meaning\nabandon,"v. 放棄\n拋棄",He abandoned it.\nability,n. 能力');
+    eq(multi.decks.length && multi.decks[0].cards.map(c => [c.word, c.meaning, c.example, c.line]),
+       [['abandon', 'v. 放棄\n拋棄', 'He abandoned it.', 2], ['ability', 'n. 能力', '', 4]], 'header row, quoted line break');
+    eq(parse('abandon,放棄').decks[0].cards.map(fields), [F('abandon', '', '放棄')], 'pasted text: still the CJK fallback');
+  });
+
+  test('parse: spreadsheet cells with line breaks (IMP-9)', () => {
+    const r = parse('abandon\t"v. 放棄\n拋棄"\tHe abandoned it.\nability\tn. 能力');
+    eq([r.errors, r.decks.length && r.decks[0].cards.map(c => [fields(c), c.line])], [[], [
+      [F('abandon', '', 'v. 放棄\n拋棄', 'He abandoned it.'), 1], [F('ability', '', 'n. 能力'), 3]]], 'quoted cell spans two lines');
+    eq(one('tab cell\t"甲\t乙"'), F('tab cell', '', '甲\t乙'), 'quoted cell with a TAB');
+    eq(words(parse('a\t"oops\nb\t乙\nc\t丙').decks[0]), ['a', 'b', 'c'], 'an unclosed quote does not swallow the file');
+    const err = parse('x\t"\n\t"');
+    eq([err.errors.map(e => [e.line, e.text]), err.decks], [[[1, 'x\t"\n\t"']], []], 'joined record reported with its first line');
+  });
+
+  test('parse: Anki plain-text headers (IMP-10)', () => {
+    eq(parse('#separator:tab\n#html:true\n#tags column:3\nabandon\tv. 放棄<br>拋棄\tunit3 vocab').decks[0].cards.map(fields),
+       [F('abandon', '', 'v. 放棄\n拋棄')], 'tags column dropped');
+    const r = parse('#notetype column:1\n#deck column:2\n#tags column:5\nBasic\tEnglish::Unit3\tabandon\t放棄\t\nBasic\tEnglish::Unit4\tability\t能力\tx');
+    eq(r.decks.map(d => [d.name, d.cards.map(fields)]), [['Unit3', [F('abandon', '', '放棄')]], ['Unit4', [F('ability', '', '能力')]]],
+       'notetype / deck / tags columns');
+    eq(one('#guid column:1\nab12Cd\tabandon\t放棄'), F('abandon', '', '放棄'), 'guid column');
+    eq(parse('#separator:Comma\nabandon,"v. 放棄, 拋棄"').decks[0].cards.map(fields), [F('abandon', '', 'v. 放棄, 拋棄')], '#separator:Comma');
+  });
+
+  test('parse: more fallback separators (IMP-11)', () => {
+    ['abandon → 放棄', 'abandon ~ 放棄', 'abandon;放棄', 'abandon；放棄', 'abandon／放棄', 'abandon > 放棄',
+     'abandon ＝ 放棄', 'abandon－放棄', 'abandon ～ 放棄'].forEach(line => eq(one(line), F('abandon', '', '放棄'), line));
+    eq(one('abandon(v.)放棄'), F('abandon', '', '(v.) 放棄'), 'glued (v.)');
+    eq(one('abandon（v.）放棄'), F('abandon', '', '（v.） 放棄'), 'glued （v.）');
+    eq(one('abandon v. 1. 放棄 2. 拋棄'), F('abandon', '', 'v. 1. 放棄 2. 拋棄'), 'sense numbers stay with the meaning');
+    eq(one('abandon ①放棄 ②拋棄'), F('abandon', '', '①放棄 ②拋棄'), 'circled sense numbers');
+    eq(one('abandon 1.放棄'), F('abandon', '', '1.放棄'), 'sense number without a space');
+    eq(one('abandon /əˈbændən/ 放棄'), F('abandon', '/əˈbændən/', '放棄'), 'phonetic slashes kept');
+    eq(one('either…or… 不是…就是…'), F('either…or…', '', '不是…就是…'), 'ellipsis kept');
+    eq(one('Level 4 單字').word, 'Level 4', 'a plain number is not a sense marker');
+  });
+
+  test('parse: real first words are not headers (IMP-13)', () => {
+    eq(words(parse('term | /tɝm/ | n. 學期；術語 | The new term starts in September. | 新學期九月開始。\nabandon | 放棄').decks[0]),
+       ['term', 'abandon'], 'term');
+    eq(words(parse('#deck: Y\nfront | n. 前面\nback | n. 後面').decks[0]), ['front', 'back'], 'front');
+    eq(words(parse('English 英文；英語\nabandon 放棄').decks[0]), ['English', 'abandon'], 'English (no separator)');
+    eq(parse('#deck: A\nterm | 學期\n#deck: B\nword | 字').decks.map(words), [['term'], ['word']], 'per section');
+    ['英文單字 | 中文意思', 'Vocabulary\tDefinition', 'Word | IPA | Meaning', '單字 | 音標 | 中文意思 | 例句', 'word']
+      .forEach(h => eq(words(parse(h + '\nx | 叉').decks[0]), ['x'], 'header "' + h + '"'));
+  });
+
+  test('parse: heteronym IPA with labels in field 2 (P1)', () => {
+    eq(one('present | /ˈprezənt/ (n.); /prɪˈzent/ (v.) | n. 禮物；v. 呈現 | She presented her plan. | 她提出了她的計畫。'),
+       F('present', '/ˈprezənt/ (n.); /prɪˈzent/ (v.)', 'n. 禮物；v. 呈現', 'She presented her plan.', '她提出了她的計畫。'), '/…/ (n.); /…/ (v.)');
+    [['record', '/ˈrekərd/ (n.), /rɪˈkɔːrd/ (v.)'], ['object', '/ˈɑːbdʒekt/ n. /əbˈdʒekt/ v.'], ['live', '/lɪv/ (v.)'],
+     ['tomato', '/təˈmeɪtoʊ/ (US)'], ['present', 'n. /ˈprezənt/ v. /prɪˈzent/'], ['present', '[ˋprɛznt] (n.) [prɪˋzɛnt] (v.)']]
+      .forEach(([w, p]) => eq(one(w + ' | ' + p + ' | n. 中文 | Example. | 例句。'), F(w, p, 'n. 中文', 'Example.', '例句。'), p));
+    eq(one('they | he/she/they | 他們'), F('they', '', 'he/she/they', '他們'), '"he/she/they" is not a phonetic');
+    const rt = parse(VC.serializeDeck('X', [F('w', '', '/x/ (note)', '例句')]));
+    eq(rt.decks[0].cards.map(fields), [F('w', '', '/x/ (note)', '例句')], 'a meaning that looks like one round-trips');
+  });
+
+  test('parse: column headers and table separators (P3)', () => {
+    ['Word | Chinese meaning', '單字 | 中文解釋', '單字\t中文解釋', '英文單字 | 中文翻譯', 'Word | Meaning (中文)',
+     'Word | Phonetic Symbol | Meaning', 'No. | Word | Meaning', '英文 | 中文意義\n--- | ---',
+     'word | /IPA/ | pos. 中文意思 | Natural English example sentence. | 自然的中文翻譯']
+      .forEach(h => eq(words(parse(h + '\napple | 蘋果').decks[0]), ['apple'], 'header "' + h + '"'));
+    eq(words(VC.parseDeckText('單字,中文解釋\napple,蘋果', { csv: true }).decks[0]), ['apple'], 'CSV header');
+    eq(words(parse('word | 字\nx | 叉').decks[0]), ['word', 'x'], '"word | 字" is a card');
+  });
+
+  test('parse: numbers as words, list markers before digits (P4)', () => {
+    eq(one('911 | n. 緊急報案電話 | Call 911 right away! | 馬上打 911！'),
+       F('911', '', 'n. 緊急報案電話', 'Call 911 right away!', '馬上打 911！'), '911 is the word');
+    eq(one('2000 | num. two thousand | in 2000'), F('2000', '', 'num. two thousand', 'in 2000'), 'English meaning with a POS');
+    eq(one('12\tabandon\tto give up'), F('abandon', '', 'to give up'), 'row number before an English word still dropped');
+    const back = parse(VC.serializeDeck('N', [F('911', '', 'n. 報案電話', 'Call 911 right away!', '馬上打 911！')]));
+    eq(back.decks[0].cards.map(fields), [F('911', '', 'n. 報案電話', 'Call 911 right away!', '馬上打 911！')], 'export → import');
+    eq(one('1. 3D printing | n. 3D 列印').word, '3D printing', '1. 3D printing');
+    eq(one('1) 24/7 | adv. 全天候').word, '24/7', '1) 24/7');
+    eq(one('1. 24/7 全天候'), F('24/7', '', '全天候'), '1. 24/7 without a separator');
+  });
+
+  test('parse: HTML tags, quotes, blank meaning cells (P8, P9, P10)', () => {
+    eq(one('remind | v. 提醒 | Remind me. | 提醒我。 | remind <sb> of <sth> 使某人想起某事').note, 'remind <sb> of <sth> 使某人想起某事', '<sb> / <sth> kept');
+    eq(one('enough | adj. 足夠的 | | | be + <adj> + enough to V').note, 'be + <adj> + enough to V', '<adj> kept');
+    eq(one('compare | v. 比較 | if a<b and b>c | 如果').example, 'if a<b and b>c', 'a<b and b>c kept');
+    eq(one('whatever\tpron. 隨便\t"Pizza or noodles?" "Whatever."\t「披薩還是麵？」「隨便。」').example,
+       '"Pizza or noodles?" "Whatever."', 'dialogue quotes in a TAB line kept');
+    eq(errOf('abandon |  | He abandoned the plan. | 他放棄了計畫。'), '缺少中文意思', 'blank meaning cell is reported');
+    eq(errOf('abandon\t\tHe abandoned the plan.\t他放棄了計畫。'), '缺少中文意思', 'blank meaning cell (TAB)');
+    eq(one('abandon |  | v. 放棄 | He gave up.'), F('abandon', '', 'v. 放棄', 'He gave up.'), 'blank 音標 column still skipped');
+  });
+
+  test('parse: fallback splits (P11)', () => {
+    [["o'clock ……點鐘", "o'clock", '……點鐘'], ['ago ...以前', 'ago', '...以前'], ['T-shirt T恤', 'T-shirt', 'T恤'],
+     ['X-ray X光', 'X-ray', 'X光'], ['1990s 1990年代', '1990s', '1990年代'], ['re- 再；重新', 're-', '再；重新'],
+     ['anti- 反對', 'anti-', '反對'], ['information [U] 資訊', 'information', '[U] 資訊'], ['lit [slang] 很讚的', 'lit', '[slang] 很讚的'],
+     ['information n. [U] 資訊', 'information', 'n. [U] 資訊'], ['watch TV看電視', 'watch TV', '看電視'], ['go on繼續', 'go on', '繼續'],
+     ['abandon-放棄', 'abandon', '放棄'], ['abandon v.放棄', 'abandon', 'v. 放棄']]
+      .forEach(([line, w, m]) => eq(one(line), F(w, '', m), line));
+    eq(one('go [go] 去'), F('go', '[go]', '去'), 'ASCII KK still a phonetic');
+  });
+
+  test('normalizeWord', () => {
+    eq(VC.normalizeWord('  Hello   World '), 'hello world', 'trim/lower/collapse');
+    eq(VC.normalizeWord('ＡＢＣ'), 'abc', 'NFKC full-width');
+    eq(VC.normalizeWord('Cafe\u0301'), VC.normalizeWord('Café'), 'NFKC composition');
+    eq(VC.normalizeWord('look\tup\nnow'), 'look up now', 'tabs/newlines');
+    eq(VC.normalizeWord('o\u2019clock'), VC.normalizeWord("o'clock"), 'curly apostrophe (IMP-7)');
+    eq(VC.normalizeWord('ab\u200Bandon\uFEFF'), 'abandon', 'zero-width characters (IMP-7)');
+  });
+
+  /* ============================================================= serialize */
+
+  test('serializeDeck: exact output', () => {
+    const cards = [
+      VC.newCard(F('abandon', '/əˈbændən/', 'v. 放棄；拋棄', 'He abandoned his car in the snow.', '他把車丟在雪地裡。'), 'd', 1, 'a', 1),
+      VC.newCard(F('ability', '', 'n. 能力', 'She has the ability to learn fast.', '她有快速學習的能力。'), 'd', 1, 'b', 2),
+      VC.newCard(F('absent', '', 'adj. 缺席的'), 'd', 1, 'c', 3),
+      VC.newCard(F('gap', '', 'n. 缺口', '', '', '只有備註'), 'd', 1, 'e', 4),
+    ];
+    eq(VC.serializeDeck('高中英文 Level 1', cards), [
+      '#deck: 高中英文 Level 1',
+      'abandon | /əˈbændən/ | v. 放棄；拋棄 | He abandoned his car in the snow. | 他把車丟在雪地裡。',
+      'ability | n. 能力 | She has the ability to learn fast. | 她有快速學習的能力。',
+      'absent | adj. 缺席的',
+      'gap | n. 缺口 |  |  | 只有備註',
+      '',
+    ].join('\n'), 'text');
+    eq(VC.serializeDeck('a|b', [F('a|b', '', '甲\n乙', 'tab\there', 'back\\slash')]),
+       '#deck: a|b\na\\|b | 甲\\n乙 | tab\\there | back\\\\slash\n', 'escapes');
+    eq(VC.serializeDeck('Empty', []), '#deck: Empty\n', 'empty deck');
+  });
+
+  test('serializeDeck: parse(serialize(x)) round-trip', () => {
+    const tricky = [
+      F('term', '', 'n. 學期；術語'),                                  // header word as FIRST card
+      F('either|or', '/ˈiðɚ/', 'conj. 不是…就是…', 'Either you or I | go.', '不是你就是我去。', 'a|b'),
+      F('multi', '', '第一行\n第二行', 'line1\nline2', '', 'note\twith tab'),
+      F('back\\slash', '[bæk]', '反斜線 \\n 不是換行', 'C:\\new\\table', '', ''),
+      F('#hashtag', '', 'n. 主題標籤'),
+      F('＃wide', '', 'n. 全形井號'),
+      F('cool', '', '[口語] 酷的'),
+      F('tag', '', 'HTML <b>粗體</b> &amp; 實體', 'x < y > z', '&lt;literal&gt;'),
+      F('slang', '', '[俚語]'),                                         // meaning that looks like a phonetic
+      F('note-only', '', 'n. 備註', '', '', 'only note'),
+      F('zh-only', '', 'n. 只有翻譯', '', '只有翻譯', ''),
+      F('data', '/ˈdeɪtə/, /ˈdætə/', 'n. 資料'),
+      F('english', '', 'n. 英文'),
+      F('dots', '', 'a / b / c', '', '', 'x / y'),
+      F('look up', '', 'phr. 查閱', 'Look it up.', '查一下。'),
+    ];
+    const r = parse(VC.serializeDeck('Round Trip', tricky));
+    eq(r.errors, [], 'no errors');
+    eq(r.decks.map(d => d.name), ['Round Trip'], 'deck name');
+    eq(r.decks.length && r.decks[0].cards.map(fields), tricky, 'cards identical');
+
+    const spec = parse('#deck: S\nabandon | /əˈbændən/ | v. 放棄 | He gave up. | 他放棄了。\nability | n. 能力\n');
+    const again = parse(VC.serializeDeck('S', spec.decks[0].cards));
+    eq(again.decks[0].cards.map(fields), spec.decks[0].cards.map(fields), 'parse → serialize → parse');
+
+    const bare = parse(VC.serializeDeck('X', [F('cat', 'kæt', 'n. 貓')]));
+    eq(fields(bare.decks[0].cards[0]), F('cat', '/kæt/', 'n. 貓'), 'phonetic without delimiters gets /…/');
+
+    // Markdown-looking text typed in the editor (P7).
+    const md = [
+      F('w1', '', 'n. 喜愛', 'I *love* apples.', '我**超愛**蘋果。', '_Important_'),
+      F('1. intro', '', 'n. 序'), F('(1) test', '', 'n. 測'), F('- ish', '', 'n. 字尾'), F('* star', '', 'n. 星'),
+      F('```', '', 'n. 反引號'), F('---', '', 'n. 線'), F('_x_', '', 'n. 底線'), F('C:\\_dir', '', 'n. 路徑'),
+    ];
+    const r2 = parse(VC.serializeDeck('MD', md));
+    eq([r2.errors, r2.decks.length && r2.decks[0].cards.map(fields)], [[], md], 'emphasis, list markers and fences round-trip');
+    eq(one('power | n. 次方 | 2**3 is 8 and 3**2 is 9. | 2**3 是 8。').example, '2**3 is 8 and 3**2 is 9.', '2**3 is not bold');
+  });
+
+  /* ============================================================ decodeBytes */
+
+  test('decodeBytes', () => {
+    const enc = new TextEncoder();
+    const text = 'abandon | 放棄';
+    const utf8 = enc.encode(text);
+    eq(VC.decodeBytes(utf8), text, 'UTF-8');
+    eq(VC.decodeBytes(new Uint8Array([0xEF, 0xBB, 0xBF, ...utf8])), text, 'UTF-8 BOM stripped');
+    const utf16 = (s, le) => {
+      const out = le ? [0xFF, 0xFE] : [0xFE, 0xFF];
+      for (let i = 0; i < s.length; i++) {
+        const c = s.charCodeAt(i);
+        out.push(...(le ? [c & 255, c >> 8] : [c >> 8, c & 255]));
+      }
+      return new Uint8Array(out);
+    };
+    eq(VC.decodeBytes(utf16(text, true)), text, 'UTF-16LE BOM');
+    eq(VC.decodeBytes(utf16(text, false)), text, 'UTF-16BE BOM');
+    eq(VC.decodeBytes(utf8.buffer), text, 'ArrayBuffer input');
+    eq(VC.decodeBytes(new Uint8Array(0)), '', 'empty');
+    const noBom = (s, le) => utf16(s, le).subarray(2);
+    eq(VC.decodeBytes(noBom(text, true)), text, 'UTF-16LE without BOM (IMP-12)');
+    eq(VC.decodeBytes(noBom(text, false)), text, 'UTF-16BE without BOM (IMP-12)');
+    const lines = enc.encode('abandon | /əˈbændən/ | v. 放棄\nability | n. 能力\n');
+    const stray = VC.decodeBytes(new Uint8Array([...lines, 0x63, 0x61, 0x66, 0xE9, 0x0A, ...lines]));
+    ok(stray.indexOf('v. 放棄') >= 0 && stray.indexOf('/əˈbændən/') >= 0 && stray.indexOf('n. 能力') >= 0,
+       'one stray Latin-1 byte keeps the rest UTF-8 (IMP-12)', stray);
+    let big5 = false;
+    try { new TextDecoder('big5'); big5 = true; } catch (e) { /* not supported */ }
+    if (big5) {
+      eq(VC.decodeBytes(new Uint8Array([0xA9, 0xF1, 0xB1, 0xF3])), '放棄', 'Big5 放棄');
+      eq(VC.decodeBytes(new Uint8Array([0x61, 0x20, 0x7C, 0x20, 0xA9, 0xF1, 0xB1, 0xF3])), 'a | 放棄', 'Big5 with ASCII');
+    } else {
+      ok(typeof VC.decodeBytes(new Uint8Array([0xA9, 0xF1])) === 'string', 'no big5 → still a string');
+    }
+  });
+
+  /* ================================================================= cards */
+
+  test('newCard', () => {
+    eq(VC.newCard({ word: 'w', meaning: 'm' }, 'd1', 1000, 'c1', 1),
+       { id: 'c1', deckId: 'd1', word: 'w', phonetic: '', meaning: 'm', example: '', exampleZh: '', note: '',
+         created: 1000, seq: 1, right: 0, wrong: 0 }, 'shape');
+    eq(VC.newCard(F('abandon', '/əˈbændən/', 'v. 放棄', 'He abandoned it.', '他放棄了。', '常考'), 'd', 5, 'i', 7),
+       { id: 'i', deckId: 'd', word: 'abandon', phonetic: '/əˈbændən/', meaning: 'v. 放棄', example: 'He abandoned it.',
+         exampleZh: '他放棄了。', note: '常考', created: 5, seq: 7, right: 0, wrong: 0 }, 'every field');
+    eq(VC.newCard({ word: 911, meaning: null }, 'd', 0, 'i', 1).word, '911', 'fields become strings');
+    eq(VC.newCard(null, 'd', 0, 'i', 1).meaning, '', 'no fields → empty strings');
+  });
+
+  /* ============================================================= headwords */
+
+  test('wordForms', () => {
+    const has = (w, forms) => {
+      const f = VC.wordForms(w);
+      forms.forEach(x => ok(f.indexOf(x) !== -1, w + ' → ' + x, JSON.stringify(f)));
+    };
+    const lacks = (w, forms) => {
+      const f = VC.wordForms(w);
+      forms.forEach(x => ok(f.indexOf(x) === -1, w + ' ↛ ' + x, JSON.stringify(f)));
+    };
+    has('abandon', ['abandon', 'abandons', 'abandoned', 'abandoning']);
+    has('make', ['makes', 'making', 'maker']);
+    lacks('make', ['made']);
+    has('use', ['used', 'uses', 'using', 'user']);
+    has('study', ['studies', 'studied', 'studying']);
+    has('happy', ['happier', 'happiest', 'happily']);
+    has('play', ['plays', 'played', 'playing', 'player']);
+    lacks('play', ['plaies', 'plaied']);
+    has('stop', ['stops', 'stopped', 'stopping']);
+    has('big', ['bigger', 'biggest']);
+    has('admit', ['admits', 'admitted', 'admitting']);
+    has('begin', ['beginning']);
+    has('simple', ['simpler', 'simplest', 'simply']);
+    has('comfortable', ['comfortably']);
+    has('basic', ['basically']);
+    has('box', ['boxes']);
+    has('quick', ['quickly', 'quicker', 'quickest']);
+    eq(VC.wordForms('be'), ['be', 'am', 'is', 'are', 'was', 'were', 'been', 'being'], 'be');
+    eq(VC.wordForms('have'), ['have', 'has', 'had', 'having'], 'have');
+    eq(VC.wordForms('do'), ['do', 'does', 'did', 'done', 'doing'], 'do');
+    eq(VC.wordForms('go'), ['go', 'goes', 'went', 'gone', 'going'], 'go');
+    VC.wordForms('go').push('x');
+    eq(VC.wordForms('go').length, 5, 'returns a copy');
+    eq(VC.wordForms(' Abandon ')[0], 'abandon', 'trimmed, lower-cased, the word itself first');
+    const make = VC.wordForms('make');
+    eq(make.length, new Set(make).size, 'no duplicates');
+    eq(VC.wordForms(''), [], 'empty word');
+    eq(VC.wordForms('constructor')[0], 'constructor', '"constructor" is not looked up on Object.prototype');
+  });
+
+  test('headwordRegex', () => {
+    const re = VC.headwordRegex('abandon');
+    ok(re instanceof RegExp, 'a RegExp');
+    ok(re && re.global && re.ignoreCase, 'global and case-insensitive');
+    ['', 'a', 'I', '123', '   ', null, undefined, '中文', 'a/an', '(v.)']
+      .forEach(w => eq(VC.headwordRegex(w), null, 'null for ' + JSON.stringify(w)));
+    // The app's highlight loop: group 1 = the character in front, group 2 = the headword.
+    const all = (sentence, word) => {
+      const r = VC.headwordRegex(word);
+      const out = [];
+      let m;
+      while ((m = r.exec(sentence)) !== null) {
+        out.push([m.index + m[1].length, m[2]]);
+        if (r.lastIndex <= m.index) r.lastIndex = m.index + 1;
+      }
+      return out;
+    };
+    eq(all('Stop! He stopped, then stops.', 'stop'), [[0, 'Stop'], [9, 'stopped'], [23, 'stops']], 'every occurrence');
+    eq(all('abandon abandon', 'abandon'), [[0, 'abandon'], [8, 'abandon']], 'adjacent occurrences');
+    eq(all('The category of a cat', 'cat'), [[18, 'cat']], 'never inside another word');
+    eq(all('He gave up, then gives up again.', 'give up'), [[17, 'gives up']], 'phrase');
+    ok(VC.headwordRegex('a.b*c(d)?') === null || VC.headwordRegex('a.b*c(d)?') instanceof RegExp, 'special characters are safe');
+    eq(all('Is a.b here? ab', 'a.b'), [], 'a dot in the word is not a wildcard');
+  });
+
+  test('findHeadword: inflections', () => {
+    const fh = VC.findHeadword;
+    eq(fh('He abandoned his car in the snow.', 'abandon'), { index: 3, text: 'abandoned' }, 'abandoned');
+    eq(fh('She is making a cake.', 'make'), { index: 7, text: 'making' }, 'making');
+    eq(fh('I studied all night.', 'study'), { index: 2, text: 'studied' }, 'studied');
+    eq(fh('The bus stopped suddenly.', 'stop'), { index: 8, text: 'stopped' }, 'stopped');
+    eq(fh('Simply put, it works.', 'simple'), { index: 0, text: 'Simply' }, 'simply');
+    eq(fh('It is basically free.', 'basic'), { index: 6, text: 'basically' }, 'basically');
+    eq(fh('She smiled happily.', 'happy'), { index: 11, text: 'happily' }, 'happily');
+    eq(fh('This box is bigger.', 'big'), { index: 12, text: 'bigger' }, 'bigger');
+    eq(fh('He admitted it.', 'admit'), { index: 3, text: 'admitted' }, 'admitted');
+    eq(fh('They were late again.', 'be'), { index: 5, text: 'were' }, 'be → were');
+    eq(fh('She went home.', 'go'), { index: 4, text: 'went' }, 'go → went');
+    eq(fh('He took it.', 'take'), null, 'other irregular forms are not found');
+  });
+
+  test('findHeadword: phrases', () => {
+    const fh = VC.findHeadword;
+    eq(fh('He gave up smoking.', 'give up'), null, 'gave up (irregular) → null');
+    eq(fh('She is giving up.', 'give up'), { index: 7, text: 'giving up' }, 'giving up');
+    eq(fh('Never give up!', 'give up'), { index: 6, text: 'give up' }, 'give up');
+    eq(fh('He never gives  up.', 'give up'), { index: 9, text: 'gives  up' }, 'two spaces in the sentence');
+    eq(fh("Don't give it up.", 'give up'), null, 'a split phrase is not found');
+    eq(fh('Give Up now.', 'GIVE UP'), { index: 0, text: 'Give Up' }, 'case-insensitive');
+    eq(fh("I'm looking forward to the trip.", 'look forward to'), { index: 4, text: 'looking forward to' }, 'three words');
+    eq(fh('She takes care of her dog.', 'take care of sth'), { index: 4, text: 'takes care of' }, 'sth left out');
+    eq(fh('He is good at math.', 'be good at sth.'), { index: 3, text: 'is good at' }, 'be + sth.');
+    eq(fh('Please pay attention to the teacher.', "pay attention to sb's"), { index: 7, text: 'pay attention to' }, "sb's left out");
+    eq(fh('Try to make up your mind.', "make up one’s mind"), null, "one’s left out: the rest must follow literally");
+    eq(fh('Is someone there?', 'someone'), { index: 3, text: 'someone' }, 'a placeholder word alone is the word itself');
+  });
+
+  test('findHeadword: word cleanup', () => {
+    const fh = VC.findHeadword;
+    const hit = { index: 3, text: 'abandoned' };
+    eq(fh('He abandoned it.', 'abandon (v.)'), hit, '(v.)');
+    eq(fh('He abandoned it.', 'abandon [vt.]'), hit, '[vt.]');
+    eq(fh('He abandoned it.', 'abandon（放棄）'), hit, '（放棄）');
+    eq(fh('He abandoned it.', 'abandon / desert'), hit, 'first of alternatives (/)');
+    eq(fh('He abandoned it.', 'abandon; desert'), hit, 'first of alternatives (;)');
+    eq(fh('My favourite colour.', 'colour, color'), { index: 13, text: 'colour' }, 'first of alternatives (,)');
+    eq(fh('Make sure your résumé is short.', 'résumé'), { index: 15, text: 'résumé' }, 'accented letters');
+    eq(fh('Make sure your résumé is short.', 'Résumé'), { index: 15, text: 'résumé' }, 'decomposed accents in the word');
+  });
+
+  test('findHeadword: boundaries and punctuation', () => {
+    const fh = VC.findHeadword;
+    eq(fh('Abandon, then leave.', 'abandon'), { index: 0, text: 'Abandon' }, 'abandon,');
+    eq(fh('He was abandoned.', 'abandon'), { index: 7, text: 'abandoned' }, 'abandoned.');
+    eq(fh('"Abandon ship!" he cried.', 'abandon'), { index: 1, text: 'Abandon' }, '"Abandon');
+    eq(fh('「Abandon」', 'abandon'), { index: 1, text: 'Abandon' }, 'full-width brackets');
+    eq(fh('(abandoned)', 'abandon'), { index: 1, text: 'abandoned' }, '(abandoned)');
+    eq(fh('ABANDONED!', 'Abandon'), { index: 0, text: 'ABANDONED' }, 'case kept in text');
+    eq(fh('The category is new.', 'cat'), null, 'cat ↛ category');
+    eq(fh('The category of a cat.', 'cat'), { index: 18, text: 'cat' }, 'the cat after category');
+    eq(fh('The cat\'s toy.', 'cat'), { index: 4, text: 'cat' }, "cat's");
+    eq(fh('His abandonment was sad.', 'abandon'), null, 'abandonment is another word');
+    eq(fh('He abandons it, then abandoned it again.', 'abandon'), { index: 3, text: 'abandons' }, 'multiple → first');
+    eq(fh('It is three o’clock.', "o'clock"), { index: 12, text: 'o’clock' }, 'curly apostrophe in the sentence');
+    eq(fh("It is three o'clock.", 'o’clock'), { index: 12, text: "o'clock" }, 'curly apostrophe in the word');
+    eq(fh('Exercise improves well-being.', 'well-being'), { index: 18, text: 'well-being' }, 'hyphenated word');
+    eq(fh('He abandoned\nit.', 'abandon'), { index: 3, text: 'abandoned' }, 'line break after');
+    eq(fh('', 'abandon'), null, 'empty sentence');
+    eq(fh(null, 'abandon'), null, 'null sentence');
+    eq(fh('He abandoned it.', ''), null, 'empty word');
+    eq(fh('He abandoned it.', 'x'), null, 'one-letter word');
+  });
+
+  /* ========================================================= spelling quiz */
+
+  test('maskWord', () => {
+    const mw = VC.maskWord;
+    eq(mw('abandoned'), { masked: 'a_______d', hidden: 7 }, 'abandoned');
+    eq(mw('Abandon'), { masked: 'A_____n', hidden: 5 }, 'case kept');
+    eq(mw('ABANDONED'), { masked: 'A_______D', hidden: 7 }, 'upper case');
+    eq(mw('fit'), { masked: 'f_t', hidden: 1 }, '3 letters');
+    eq(mw('up'), { masked: 'u_', hidden: 1 }, '2-letter run keeps the first letter');
+    eq(mw('a'), { masked: 'a', hidden: 0 }, '1-letter run stays');
+    eq(mw('give up'), { masked: 'g__e u_', hidden: 3 }, 'give up');
+    eq(mw('giving  up'), { masked: 'g____g  u_', hidden: 5 }, 'spaces kept');
+    eq(mw('look forward to'), { masked: 'l__k f_____d t_', hidden: 8 }, 'three words');
+    eq(mw('well-being'), { masked: 'w__l-b___g', hidden: 5 }, 'hyphen');
+    eq(mw("o'clock"), { masked: "o'c___k", hidden: 3 }, 'apostrophe');
+    eq(mw('o’clock'), { masked: 'o’c___k', hidden: 3 }, 'curly apostrophe');
+    eq(mw('résumé'), { masked: 'r____é', hidden: 4 }, 'accented letters');
+    eq(mw('3D'), { masked: '3D', hidden: 0 }, 'digits stay');
+    eq(mw(''), { masked: '', hidden: 0 }, 'empty');
+    eq(mw(null), { masked: '', hidden: 0 }, 'null');
+  });
+
+  test('makeCloze', () => {
+    const card = (word, example) => C('c', word, 'v. 放棄', { example });
+    eq(VC.makeCloze(card('abandon', 'He abandoned his car in the snow.')),
+       { before: 'He ', answer: 'abandoned', after: ' his car in the snow.', masked: 'a_______d', hidden: 7 }, 'abandoned');
+    eq(VC.makeCloze(card('abandon', 'Abandon ship!')),
+       { before: '', answer: 'Abandon', after: ' ship!', masked: 'A_____n', hidden: 5 }, 'at the start, case kept');
+    eq(VC.makeCloze(card('give up', 'She is giving up.')),
+       { before: 'She is ', answer: 'giving up', after: '.', masked: 'g____g u_', hidden: 5 }, 'phrase');
+    eq(VC.makeCloze(card('ox', 'An ox.')), { before: 'An ', answer: 'ox', after: '.', masked: 'o_', hidden: 1 }, '2-letter word');
+    eq(VC.makeCloze(card('cat', 'A category and a cat.')).before, 'A category and a ', 'whole words only');
+    eq(VC.makeCloze(card('abandon', 'Abandon it? He abandoned it.')).before, '', 'first occurrence');
+    eq(VC.makeCloze(card('give up', 'He gave up.')), null, 'irregular form → null');
+    eq(VC.makeCloze(card('abandon', '')), null, 'no example');
+    eq(VC.makeCloze(card('abandon', 'He left his car.')), null, 'word not in the example');
+    eq(VC.makeCloze(card('x y', 'Plot x y here.')), null, 'nothing to hide → null');
+    const c = card('well-being', 'Sleep is good for your well-being.');
+    const z = VC.makeCloze(c);
+    eq(z && z.before + z.answer + z.after, c.example, 'before + answer + after = example');
+    eq(z && z.masked, 'w__l-b___g', 'hyphenated mask');
+    eq(VC.makeCloze(null), null, 'null card');
+    eq(VC.makeCloze({}), null, 'empty card');
+  });
+
+  test('checkSpelling', () => {
+    const yes = (input, answer, label) => eq(VC.checkSpelling(input, answer), true, label || JSON.stringify([input, answer]));
+    const no = (input, answer, label) => eq(VC.checkSpelling(input, answer), false, label || JSON.stringify([input, answer]));
+    yes('abandoned', 'abandoned', 'exact');
+    yes('Abandoned', 'abandoned', 'input case');
+    yes('abandoned', 'Abandoned', 'answer case');
+    yes('ABANDONED', 'Abandoned', 'upper case');
+    yes('  abandoned  ', 'abandoned', 'spaces around');
+    ['.', '!', '?', ',', ';', ':', '；', '。', '！', '？', ' .', '...', '?!']
+      .forEach(p => yes('abandoned' + p, 'abandoned', 'trailing ' + JSON.stringify(p)));
+    yes('ａｂａｎｄｏｎｅｄ', 'abandoned', 'full-width letters (NFKC)');
+    yes('giving  up', 'giving up', 'spaces collapsed');
+    yes('Giving Up', 'giving up', 'phrase, any case');
+    yes('o’clock', "o'clock", 'curly apostrophe typed');
+    yes("o'clock", 'o‘clock', 'curly apostrophe in the answer');
+    yes('well‐being', 'well-being', 'Unicode hyphen');
+    yes('aban​doned', 'abandoned', 'zero-width space');
+    yes('resume', 'résumé', 'accents optional');
+    yes('résumé', 'résumé', 'accents typed');
+    yes('bandone', 'abandoned', 'only the hidden letters');
+    yes('BANDONE', 'Abandoned', 'hidden letters, any case');
+    yes('i', 'fit', 'hidden letter of a 3-letter word');
+    no('bandoned', 'abandoned', 'first letter left out only');
+    no('abandone', 'abandoned', 'last letter left out only');
+    no('abandon', 'abandoned', 'base form for an inflected answer');
+    no('abandonded', 'abandoned', 'misspelt');
+    no('ivin', 'giving up', 'hidden letters do not count for a phrase');
+    no('ell-bein', 'well-being', '… nor for a hyphenated word');
+    no('p', 'up', '… nor for a 2-letter word');
+    no('givingup', 'giving up', 'missing space');
+    no('', 'abandoned', 'empty input');
+    no('   ', 'abandoned', 'spaces only');
+    no('.', 'abandoned', 'punctuation only');
+    no(null, 'abandoned', 'null input');
+    no('abandoned', '', 'empty answer');
+    no('', '', 'both empty');
+  });
+
+  /* =========================================================== choice quiz */
+
+  test('posOf', () => {
+    [['v. 放棄', 'v.'], ['n. 能力', 'n.'], ['adj. 缺席的', 'adj.'], ['adv. 快速地', 'adv.'], ['phr. 查閱', 'phr.'],
+     ['vt. 拋棄', 'vt.'], ['vi. 跑', 'vi.'], ['prep. 在…之上', 'prep.'], ['conj. 和', 'conj.'], ['pron. 他', 'pron.'],
+     ['interj. 哇', 'interj.'], ['num. 二', 'num.'], ['aux. 能', 'aux.'], ['N. 名詞', 'n.'], ['Adj. 快樂的', 'adj.'],
+     ['(v.) 放棄', 'v.'], ['（n.） 紀錄', 'n.'], ['n./v. 紀錄；記錄', 'n.'], ['  adv. 快', 'adv.'], ['v.放棄', 'v.'],
+     ['v. 放棄\nn. 放縱', 'v.'], ['放棄', ''], ['', ''], [null, ''], ['n 蘋果', ''], ['nice 好的', ''],
+     ['very 很', ''], ['[U] 資訊', ''], ['動詞 放棄', '']]
+      .forEach(([m, want]) => eq(VC.posOf(m), want, JSON.stringify(m)));
+  });
+
+  test('meaningKey', () => {
+    eq(VC.meaningKey('v. 放棄\n拋棄'), 'v. 放棄；拋棄', 'line break → ；');
+    eq(VC.meaningKey(' v. 放棄 \r\n 拋棄\n'), 'v. 放棄；拋棄', 'CRLF, spaces around, trailing line break');
+    eq(VC.meaningKey('  N.   能力 '), 'n. 能力', 'trim, collapse, lower-case');
+    eq(VC.meaningKey('V. 放棄\n拋棄'), VC.meaningKey('v. 放棄；拋棄'), 'same meaning, same key');
+    eq(VC.meaningKey(null), '', 'null');
+  });
+
+  test('shuffle', () => {
+    const input = Object.freeze([1, 2, 3, 4, 5]);
+    const out = VC.shuffle(input, RNG(7));
+    ok(out !== input, 'a new array');
+    eq(input, [1, 2, 3, 4, 5], 'input unchanged');
+    eq(out.slice().sort(), [1, 2, 3, 4, 5], 'same items');
+    eq(VC.shuffle([1, 2, 3, 4], () => 0), [2, 3, 4, 1], 'Fisher–Yates, rng 0');
+    eq(VC.shuffle([1, 2, 3, 4], () => 0.999), [1, 2, 3, 4], 'Fisher–Yates, rng → 1');
+    eq(VC.shuffle([1, 2, 3, 4], () => 1), [1, 2, 3, 4], 'rng() === 1 stays in range');
+    eq(VC.shuffle([1, 2, 3], () => -1), [2, 3, 1], 'a negative rng() counts as 0');
+    eq(VC.shuffle([1, 2, 3], () => NaN), [2, 3, 1], 'NaN counts as 0');
+    eq(VC.shuffle([]), [], 'empty');
+    eq(VC.shuffle(null), [], 'null → []');
+    eq(VC.shuffle(['x']), ['x'], 'one item');
+    const ten = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9];
+    eq(VC.shuffle(ten, RNG(42)), VC.shuffle(ten, RNG(42)), 'same seed → same order');
+    ok(stable(VC.shuffle(ten, RNG(1))) !== stable(VC.shuffle(ten, RNG(2))), 'different seed → different order');
+    eq(VC.shuffle(ten).sort((a, b) => a - b), ten, 'default rng (Math.random)');
+    const counts = {};
+    const rng = RNG(2026);
+    for (let i = 0; i < 6000; i++) {
+      const k = VC.shuffle(['a', 'b', 'c'], rng).join('');
+      counts[k] = (counts[k] || 0) + 1;
+    }
+    eq(Object.keys(counts).sort(), ['abc', 'acb', 'bac', 'bca', 'cab', 'cba'], 'all 6 orders occur');
+    ok(Object.keys(counts).every(k => counts[k] > 850 && counts[k] < 1150), 'uniform', JSON.stringify(counts));
+  });
+
+  test('seededRng', () => {
+    const seq = (seed, n = 3) => Array.from({ length: n }, VC.seededRng(seed));
+    // Reference values of mulberry32 (computed independently): a saved shuffle order must not change.
+    eq(seq(0), [0.26642920868471265, 0.0003297457005828619, 0.2232720274478197], 'mulberry32(0)');
+    eq(seq(42), [0.6011037519201636, 0.44829055899754167, 0.8524657934904099], 'mulberry32(42)');
+    eq(seq(123456789), [0.2577907438389957, 0.9707721115555614, 0.7853280142880976], 'mulberry32(123456789)');
+    eq(seq(42, 50), seq(42, 50), 'same seed → same sequence');
+    ok(stable(seq(42)) !== stable(seq(43)), 'different seed → different sequence');
+    eq(seq('42'), seq(42), 'numeric string seed');
+    eq(seq(undefined), seq(0), 'no seed = 0');
+    eq(seq(Math.pow(2, 32) + 5), seq(5), 'seed taken as uint32');
+    eq(seq(-1), seq(4294967295), 'negative seed wraps');
+    const many = seq(1760000000000, 2000).concat(seq(7, 2000));
+    ok(many.every(x => typeof x === 'number' && x >= 0 && x < 1), 'values in [0, 1)');
+    eq(new Set(seq(7, 2000)).size, 2000, 'no short cycle');
+    const mean = seq(99, 10000).reduce((a, b) => a + b, 0) / 10000;
+    ok(mean > 0.48 && mean < 0.52, 'mean ≈ 0.5', String(mean));
+    const a = VC.seededRng(5);
+    const b = VC.seededRng(5);
+    a(); a();
+    eq(b(), seq(5, 1)[0], 'generators are independent');
+  });
+
+  test('pickChoices: options and answerIndex', () => {
+    const card = C('a', 'abandon', 'v. 放棄');
+    const pool = [card, C('b', 'absorb', 'v. 吸收'), C('c', 'accept', 'v. 接受'), C('d', 'achieve', 'v. 達成'),
+      C('e', 'ability', 'n. 能力'), C('f', 'absent', 'adj. 缺席的'), C('g', 'abroad', 'adv. 在國外')];
+    const p = VC.pickChoices(card, pool, RNG(1));
+    eq(Object.keys(p).sort(), ['answerIndex', 'options'], 'shape');
+    eq(p.options.length, 4, '4 options');
+    eq(p.options[p.answerIndex], 'v. 放棄', 'options[answerIndex] = the meaning');
+    eq(p.options.slice().sort(), ['v. 吸收', 'v. 接受', 'v. 放棄', 'v. 達成'].sort(), 'same part of speech first');
+    const at = [0, 0, 0, 0];
+    let bad = null;
+    for (let s = 0; s < 400 && !bad; s++) {
+      const q = VC.pickChoices(card, pool, RNG(s));
+      at[q.answerIndex]++;
+      if (q.options.length !== 4 || q.options[q.answerIndex] !== 'v. 放棄' || new Set(q.options).size !== 4 ||
+          q.options.filter(o => o === 'v. 放棄').length !== 1 || q.options.some(o => VC.posOf(o) !== 'v.')) {
+        bad = s + ': ' + JSON.stringify(q);
+      }
+    }
+    ok(!bad, '400 seeds: 4 distinct v. options, the card once, answerIndex right', bad);
+    ok(at.every(n => n > 60), 'the answer lands on every position', JSON.stringify(at));
+    eq(VC.pickChoices(card, pool, RNG(9)), VC.pickChoices(card, pool, RNG(9)), 'deterministic with a seeded rng');
+    const q = VC.pickChoices(card, pool);
+    eq([q.options.length, q.options[q.answerIndex]], [4, 'v. 放棄'], 'default rng (Math.random)');
+    const frozen = Object.freeze(pool.map(c => Object.freeze(Object.assign({}, c))));
+    const before = stable(frozen);
+    VC.pickChoices(frozen[0], frozen, RNG(3));
+    eq(stable(frozen), before, 'pool and cards unchanged');
+  });
+
+  test('pickChoices: part-of-speech fallback and distinct meanings', () => {
+    const card = C('a', 'abandon', 'v. 放棄');
+    const pool = [C('b', 'absorb', 'v. 吸收'), C('e', 'ability', 'n. 能力'), C('f', 'absent', 'adj. 缺席的'),
+      C('g', 'abroad', 'adv. 在國外'), C('h', 'academy', 'n. 學院')];
+    const seen = new Set();
+    let bad = null;
+    for (let s = 0; s < 200 && !bad; s++) {
+      const q = VC.pickChoices(card, pool, RNG(s));
+      if (q.options.length !== 4 || q.options.indexOf('v. 吸收') === -1 || q.options[q.answerIndex] !== 'v. 放棄') {
+        bad = s + ': ' + JSON.stringify(q);
+      }
+      q.options.forEach(o => seen.add(o));
+    }
+    ok(!bad, 'the only other v. meaning is always used, the rest is filled', bad);
+    eq(seen.size, 6, 'every other meaning gets its turn');
+
+    const noPos = C('n', 'apple', '蘋果');
+    const mixed = [C('m', 'banana', '香蕉'), C('o', 'orange', '橘子'), C('r', 'run', 'v. 跑'), C('w', 'walk', 'v. 走'), C('k', 'book', 'n. 書')];
+    bad = null;
+    for (let s = 0; s < 50 && !bad; s++) {
+      const q = VC.pickChoices(noPos, mixed, RNG(s));
+      if (q.options.indexOf('香蕉') === -1 || q.options.indexOf('橘子') === -1 || q.options.length !== 4) bad = JSON.stringify(q);
+    }
+    ok(!bad, 'no part of speech: meanings without one come first', bad);
+
+    const card2 = C('a', 'abandon', 'v. 放棄；拋棄');
+    const dup = [C('p', 'desert', 'v. 放棄\n拋棄'), C('q', 'forsake', ' V. 放棄；拋棄 '), C('b', 'absorb', 'v. 吸收'),
+      C('b2', 'soak up', 'v.  吸收'), C('b3', 'take in', 'V. 吸收'), C('e', 'ability', 'n. 能力')];
+    bad = null;
+    for (let s = 0; s < 100 && !bad; s++) {
+      const q = VC.pickChoices(card2, dup, RNG(s));
+      const keys = q.options.map(VC.meaningKey);
+      if (q.options.length !== 3 || new Set(keys).size !== 3 || keys.filter(k => k === 'v. 放棄；拋棄').length !== 1 ||
+          q.options[q.answerIndex] !== 'v. 放棄；拋棄' || keys.indexOf('n. 能力') === -1) bad = s + ': ' + JSON.stringify(q);
+    }
+    ok(!bad, 'distinct by meaningKey (case, spaces, line breaks); fewer options when the pool runs out', bad);
+  });
+
+  test('pickChoices: small pools and exclusions', () => {
+    const card = C('a', 'abandon', 'v. 放棄');
+    const only = { options: ['v. 放棄'], answerIndex: 0 };
+    eq(VC.pickChoices(card, [card], RNG(1)), only, 'only the card itself → 1 option');
+    eq(VC.pickChoices(card, [], RNG(1)), only, 'empty pool');
+    eq(VC.pickChoices(card, null, RNG(1)), only, 'no pool');
+    eq(VC.pickChoices(card, [Object.assign({}, card, { meaning: 'v. 拋棄' })], RNG(1)), only, 'a copy with the same id is the card');
+    eq(VC.pickChoices(card, [C('z', ' Abandon', 'v. 遺棄', { deckId: 'd2' })], RNG(1)), only,
+       'the same word (e.g. in another deck) is never a wrong option');
+    eq(VC.pickChoices(card, [C('e', 'empty', ''), C('s', 'space', '  \n '), null, undefined], RNG(1)), only, 'blank meanings and holes skipped');
+    const two = VC.pickChoices(card, [card, C('b', 'absorb', 'n. 吸收')], RNG(3));
+    eq(two.options.slice().sort(), ['n. 吸收', 'v. 放棄'].sort(), '2 options');
+    eq(two.options[two.answerIndex], 'v. 放棄', 'answerIndex with 2 options');
+    const big = ['吸收', '接受', '達成', '採用', '承認', '調整', '影響'].map((m, i) => C('v' + i, 'w' + i, 'v. ' + m));
+    eq(VC.pickChoices(card, big, RNG(1), 2).options.length, 2, 'n = 2');
+    eq(VC.pickChoices(card, big, RNG(1), 6).options.length, 6, 'n = 6');
+    eq(VC.pickChoices(card, big, RNG(1), 0), only, 'n < 1 → the answer only');
+    eq(VC.pickChoices(card, big, RNG(1), 'x').options.length, 4, 'bad n → 4');
+  });
+
+  /* ================================================================== quiz */
+
+  const deckCards = [
+    C('c1', 'abandon', 'v. 放棄', { phonetic: '/əˈbændən/', example: 'He abandoned his car in the snow.', exampleZh: '他把車丟在雪地裡。' }),
+    C('c2', 'ability', 'n. 能力', { example: 'She has the ability to learn fast.', exampleZh: '她有快速學習的能力。' }),
+    C('c3', 'absent', 'adj. 缺席的', { example: 'He was absent from school.' }),   // no exampleZh → hint = meaning
+    C('c4', 'absorb', 'v. 吸收', { example: 'Plants take in water.' }),             // word not in the example
+    C('c5', 'accept', 'v. 接受'),                                                    // no example
+    C('c6', 'give up', 'phr. 放棄', { example: 'She is giving up.', exampleZh: '她要放棄了。' }),
+    C('c7', 'achieve', 'v. 達成', { example: 'They achieved their goal.', exampleZh: '他們達成了目標。' }),
+  ];
+  const byId = id => deckCards.filter(c => c.id === id)[0];
+  const tiny = [C('t1', 'quit', 'v. 放棄'), C('t2', 'abandon', 'V. 放棄 ')]; // one distinct meaning
+
+  test('buildQuiz: choice', () => {
+    const qs = VC.buildQuiz(deckCards, 'choice', 3, RNG(1));
+    eq(qs.length, 3, 'count 3');
+    eq(new Set(qs.map(q => q.cardId)).size, 3, 'no card twice');
+    qs.forEach(q => {
+      const c = byId(q.cardId);
+      eq(Object.keys(q).sort(), ['answerIndex', 'cardId', 'mode', 'options', 'phonetic', 'word'], 'shape');
+      eq([q.mode, q.word, q.phonetic], ['choice', c.word, c.phonetic], 'mode, word, phonetic');
+      eq([q.options.length, q.options[q.answerIndex]], [4, c.meaning], '4 options, answer right');
+    });
+    const all = VC.buildQuiz(deckCards, 'choice', 0, RNG(2));
+    eq(all.map(q => q.cardId).sort(), deckCards.map(c => c.id), 'count 0 = every card once');
+    eq(VC.buildQuiz(deckCards, 'choice', 20, RNG(2)).length, 7, 'count > cards → all');
+    eq(VC.buildQuiz(deckCards, 'choice', 0, RNG(5)), VC.buildQuiz(deckCards, 'choice', 0, RNG(5)), 'deterministic with a seed');
+    const orders = new Set();
+    for (let s = 0; s < 10; s++) orders.add(VC.buildQuiz(deckCards, 'choice', 0, RNG(s)).map(q => q.cardId).join());
+    ok(orders.size >= 9, 'a fresh random order each time', orders.size);
+    eq(VC.buildQuiz(tiny, 'choice', 0, RNG(1)), [], 'one distinct meaning → no question');
+    const shared = VC.buildQuiz(tiny.concat([C('t3', 'absorb', 'v. 吸收')]), 'choice', 0, RNG(1));
+    eq([shared.length, shared.every(q => q.options.length === 2)], [3, true], 'a shared meaning still makes 2-option questions');
+    // A card without wrong options is skipped and the next card takes its place.
+    const cards = [C('x1', 'abandon', 'v. 放棄'), C('x2', 'absorb', 'v. 吸收')];
+    const pool = [cards[0], C('x3', 'quit', 'v. 放棄')];
+    let bad = null;
+    for (let s = 0; s < 20 && !bad; s++) {
+      const one = VC.buildQuiz(cards, 'choice', 1, RNG(s), pool);
+      if (one.length !== 1 || one[0].cardId !== 'x2') bad = s + ': ' + JSON.stringify(one);
+    }
+    ok(!bad, 'skipped cards do not shrink the quiz', bad);
+  });
+
+  test('buildQuiz: choice with an all-decks pool', () => {
+    const qs = VC.buildQuiz(tiny, 'choice', 0, RNG(4), tiny.concat(deckCards));
+    eq(qs.length, 2, 'both cards');
+    let bad = null;
+    qs.forEach(q => {
+      const keys = q.options.map(VC.meaningKey);
+      if (q.options.length !== 4 || VC.meaningKey(q.options[q.answerIndex]) !== 'v. 放棄' ||
+          keys.filter(k => k === 'v. 放棄').length !== 1 || q.options.some(o => VC.posOf(o) !== 'v.')) bad = JSON.stringify(q);
+    });
+    ok(!bad, '4 options, v. first, the meaning once (abandon in deckCards is the same word)', bad);
+    ok(qs.every(q => q.options.indexOf('phr. 放棄') === -1), 'no other part of speech needed', JSON.stringify(qs));
+  });
+
+  test('buildQuiz: spell', () => {
+    const qs = VC.buildQuiz(deckCards, 'spell', 0, RNG(2));
+    eq(qs.map(q => q.cardId).sort(), ['c1', 'c2', 'c3', 'c6', 'c7'], 'only cards whose example contains the word');
+    qs.forEach(q => {
+      eq(Object.keys(q).sort(), ['cardId', 'cloze', 'hint', 'mode'], 'shape');
+      eq(q.mode, 'spell', 'mode');
+      eq(q.cloze, VC.makeCloze(byId(q.cardId)), 'cloze = makeCloze(card)');
+    });
+    const of = id => qs.filter(q => q.cardId === id)[0];
+    eq(of('c1').hint, '他把車丟在雪地裡。', 'hint = exampleZh');
+    eq(of('c3').hint, 'adj. 缺席的', 'no exampleZh → hint = meaning');
+    eq(of('c6').cloze.answer, 'giving up', 'phrase answer');
+    eq(VC.buildQuiz(deckCards, 'spell', 2, RNG(1)).length, 2, 'count 2');
+    eq(VC.buildQuiz(deckCards, 'spell', 10, RNG(1)).length, 5, 'count > eligible → all eligible');
+    let bad = null;
+    for (let s = 0; s < 30 && !bad; s++) {
+      const n = VC.buildQuiz(deckCards, 'spell', 4, RNG(s)).length;
+      if (n !== 4) bad = s + ': ' + n;
+    }
+    ok(!bad, 'skipped cards do not shrink the quiz', bad);
+  });
+
+  test('buildQuiz: input handling', () => {
+    throws(() => VC.buildQuiz(deckCards, 'study', 10, RNG(1)), 'unknown mode');
+    eq(VC.buildQuiz([], 'choice', 10, RNG(1)), [], 'no cards');
+    eq(VC.buildQuiz(null, 'spell', 10, RNG(1)), [], 'null cards');
+    eq(VC.buildQuiz(deckCards.concat([null, undefined]), 'spell', 0, RNG(1)).length, 5, 'holes skipped');
+    eq(VC.buildQuiz(deckCards, 'choice', '3', RNG(1)).length, 3, 'count as a string');
+    eq(VC.buildQuiz(deckCards, 'choice', undefined, RNG(1)).length, 7, 'no count = all');
+    eq(VC.buildQuiz(deckCards, 'choice', -2, RNG(1)).length, 7, 'negative count = all');
+    eq(VC.buildQuiz(deckCards, 'spell', 3).length, 3, 'default rng (Math.random)');
+    const frozen = Object.freeze(deckCards.map(c => Object.freeze(Object.assign({}, c))));
+    const before = stable(frozen);
+    VC.buildQuiz(frozen, 'choice', 0, RNG(1));
+    VC.buildQuiz(frozen, 'spell', 0, RNG(1));
+    eq(stable(frozen), before, 'cards unchanged');
+  });
+
+  test('quizEligible', () => {
+    eq(VC.quizEligible(deckCards), { choice: 7, spell: 5 }, 'deck');
+    eq(VC.quizEligible([]), { choice: 0, spell: 0 }, 'empty');
+    eq(VC.quizEligible(null), { choice: 0, spell: 0 }, 'null');
+    eq(VC.quizEligible(tiny), { choice: 0, spell: 0 }, 'one distinct meaning, no examples');
+    eq(VC.quizEligible(tiny, tiny.concat(deckCards)), { choice: 2, spell: 0 }, 'with an all-decks pool');
+    eq(VC.quizEligible([C('o', 'one', 'n. 一', { example: 'Only one.' })]), { choice: 0, spell: 1 }, 'a single card: spelling only');
+    const sets = [deckCards, tiny, tiny.concat(deckCards), [C('s1', 'abandon', 'v. 放棄'), C('s2', 'Abandon', 'v. 拋棄')]];
+    let bad = null;
+    sets.forEach((cards, i) => {
+      const e = VC.quizEligible(cards);
+      for (let s = 0; s < 5; s++) {
+        const n = [VC.buildQuiz(cards, 'choice', 0, RNG(s)).length, VC.buildQuiz(cards, 'spell', 0, RNG(s)).length];
+        if (n[0] !== e.choice || n[1] !== e.spell) bad = 'set ' + i + ': ' + JSON.stringify([e, n]);
+      }
+    });
+    ok(!bad, 'quizEligible = what buildQuiz(…, 0) makes', bad);
+  });
+
+  test('quiz from an imported file (parse → newCard → buildQuiz)', () => {
+    const r = parse([
+      '#deck: Q',
+      'abandon | /əˈbændən/ | v. 放棄；拋棄 | He abandoned his car in the snow. | 他把車丟在雪地裡。',
+      'look forward to | phr. 期待 | I\'m looking forward to the trip. | 我很期待這趟旅行。',
+      'efficient | adj. 有效率的 | She works efficiently. | 她工作很有效率。',
+      'consequence | n. 後果 | You must accept the consequences. | 你必須接受後果。',
+      'take | v. 拿 | He took the last one. | 他拿了最後一個。',
+      'well-being | n. 幸福；健康 | Sleep matters for your well-being. | 睡眠對健康很重要。',
+    ].join('\n'));
+    const cards = r.decks[0].cards.map((c, i) => VC.newCard(c, 'q', 0, 'q' + i, i));
+    eq(cards.map(c => { const z = VC.makeCloze(c); return z && [z.answer, z.masked]; }), [
+      ['abandoned', 'a_______d'], ['looking forward to', 'l_____g f_____d t_'], ['efficiently', 'e_________y'],
+      ['consequences', 'c__________s'], null, ['well-being', 'w__l-b___g']], 'answers and masks');
+    eq(VC.quizEligible(cards), { choice: 6, spell: 5 }, 'eligible');
+    const qs = VC.buildQuiz(cards, 'spell', 0, RNG(1));
+    ok(qs.every(q => VC.checkSpelling(q.cloze.answer.toUpperCase() + '.', q.cloze.answer)), 'every answer accepted as typed');
+  });
+  }
+
+  /* ----------------------------------------------------------------- report */
+  try {
+    if (typeof VC === 'undefined') throw new Error('core.js did not load (window.VC is undefined)');
+    run();
+  } catch (e) {
+    current = 'setup';
+    record(false, 'fatal', String(e && e.stack || e));
+  }
+  const lines = ['RESULT: PASS ' + pass + ' FAIL ' + fail, ''];
+  failures.forEach(f => lines.push('FAIL ' + f.name + (f.label ? ' › ' + f.label : ''), '    ' + f.detail));
+  if (!fail) lines.push('All ' + pass + ' assertions passed.');
+  const out = document.getElementById('out');
+  out.textContent = lines.join('\n');
+  out.className = fail ? 'fail' : 'pass';
+  document.title = lines[0];
+})();
+</script>
+</body>
+</html>

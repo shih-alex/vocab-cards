@@ -1,0 +1,10 @@
+﻿# 開發用檔案，不需要放到網站上
+tests/shots/
+tests/_scratch*/
+dist/
+.claude/
+__pycache__/
+*.pyc
+
+# 個人的單字檔（不公開）
+單字檔/

@@ -1,0 +1,34 @@
+{
+  "id": "./",
+  "name": "單字卡",
+  "short_name": "單字卡",
+  "description": "簡潔好用的英文單字卡：匯入文字檔就能開始背，還有選擇題和拼字題測驗。",
+  "lang": "zh-Hant",
+  "dir": "ltr",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "theme_color": "#7B1E2B",
+  "background_color": "#FAFAF9",
+  "categories": ["education"],
+  "icons": [
+    {
+      "src": "icons/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "icons/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "icons/icon-maskable-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "maskable"
+    }
+  ]
+}

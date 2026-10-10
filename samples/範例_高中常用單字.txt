@@ -1,0 +1,51 @@
+# 範例牌組：高中常用單字（學測 Level 3–5，共 40 字）
+# 這個檔案同時也是「單字卡」文字檔格式的示範，可以照著它的寫法做自己的單字檔。
+# 每行一張卡片，欄位用 | 分隔，順序是：
+#   單字 | 音標 | 詞性. 中文意思 | 例句 | 例句翻譯 | 備註
+# 音標、例句、例句翻譯、備註都可以省略，最少只要「單字 | 中文意思」就好。
+# 例句要包含單字本身或它的規則變化（-s、-ed、-ing…），拼字題才能把它挖空出題。
+# 音標要用 /…/ 或 […] 包起來，放在第二欄。
+# 以 # 開頭的行是註解，匯入時會被忽略；只有「#deck: 名稱」那行用來指定牌組名稱。
+# 詳細規則請看「格式說明.md」。
+
+#deck: 範例・高中常用單字
+abandon | /əˈbændən/ | v. 拋棄；放棄 | Someone abandoned the puppy on the side of the road. | 有人把那隻小狗丟在路邊。
+accurate | /ˈækjərət/ | adj. 準確的；精確的 | The weather forecast was surprisingly accurate this week. | 這週的天氣預報出乎意料地準。
+anxiety | /æŋˈzaɪəti/ | n. 焦慮；擔憂 | Many students feel a lot of anxiety before big exams. | 很多學生在大考前都會非常焦慮。
+appreciate | /əˈpriʃiˌeɪt/ | v. 感激；欣賞；理解 | Thank you for your help. I really appreciate it. | 謝謝你的幫忙，我真的很感激。 | 常用句型：I'd appreciate it if you could…（如果你能……我會很感激）
+approach | /əˈproʊtʃ/ | v. 接近；靠近；n. 方法；途徑 | As the exam approached, the classroom grew quieter. | 隨著考試逼近，教室變得越來越安靜。
+attitude | n. 態度 | She has a positive attitude toward life. | 她對人生抱持著正面的態度。 | attitude toward(s)… 對……的態度
+available | /əˈveɪləbəl/ | adj. 有空的；可取得的；可用的 | Are you available this Saturday afternoon? | 你這個星期六下午有空嗎？
+awkward | /ˈɔkwɚd/ | adj. 尷尬的；笨拙的 | There was an awkward silence after he told the joke. | 他講完那個笑話後，現場陷入一陣尷尬的沉默。
+benefit | n. 好處；益處；v. 對……有益 | Regular exercise has many benefits for your health. | 規律運動對健康有很多好處。 | benefit from… 從……中獲益
+candidate | /ˈkændəˌdeɪt/ | n. 候選人；應徵者 | Three candidates are running for student council president. | 有三位候選人正在競選學生會長。
+confident | /ˈkɑnfədənt/ | adj. 有信心的；自信的 | I feel confident that I'll pass the test. | 我有信心能通過這次考試。
+consequence | /ˈkɑnsəˌkwɛns/ | n. 後果；結果 | You have to accept the consequences of your choices. | 你必須承擔自己選擇的後果。
+contribute | /kənˈtrɪbjut/ | v. 貢獻；捐獻；促成 | Everyone in the group contributed ideas to the project. | 小組裡每個人都為這個專題貢獻了想法。 | contribute to… 促成；導致（好壞結果都可以用）
+delicate | /ˈdɛləkət/ | adj. 易碎的；精緻的；微妙的 | Be careful with those glasses. They're very delicate. | 小心那些玻璃杯，它們很容易破。
+determine | /dɪˈtɝmɪn/ | v. 決定；查明 | Your daily habits determine your future. | 你每天的習慣決定了你的未來。 | be determined to + V 下定決心做……
+distinguish | /dɪˈstɪŋgwɪʃ/ | v. 區分；辨別 | Can you distinguish between the twins? | 你分得出那對雙胞胎誰是誰嗎？ | distinguish A from B 區分 A 與 B
+efficient | /ɪˈfɪʃənt/ | adj. 有效率的；效能高的 | Making a to-do list helps me study more efficiently. | 列出待辦清單能幫助我更有效率地讀書。
+emphasize | /ˈɛmfəˌsaɪz/ | v. 強調；著重 | Our teacher emphasized the importance of reading every day. | 我們老師強調每天閱讀的重要性。
+encounter | /ɪnˈkaʊntɚ/ | v. 遇到；遭遇；n. 相遇；遭遇 | We encountered a few problems during the trip. | 我們在旅途中遇到了一些問題。
+essential | /ɪˈsɛnʃəl/ | adj. 不可或缺的；必要的；基本的 | Water is essential to all living things. | 水對所有生物來說都是不可或缺的。
+evidence | /ˈɛvədəns/ | n. 證據；跡象 | The police found no evidence that he was at the scene. | 警方找不到他曾在現場的證據。 | 不可數名詞：a piece of evidence（一項證據）
+exaggerate | /ɪgˈzædʒəˌreɪt/ | v. 誇大；誇張 | Don't exaggerate. It wasn't that scary! | 別誇張了，哪有那麼可怕！
+exhausted | /ɪgˈzɔstɪd/ | adj. 筋疲力盡的；累壞的 | After the long hike, we were completely exhausted. | 長途健行之後，我們全都累壞了。
+flexible | /ˈflɛksəbəl/ | adj. 有彈性的；靈活的 | My part-time job has flexible working hours. | 我打工的上班時間很有彈性。
+generous | /ˈdʒɛnərəs/ | adj. 慷慨的；大方的 | It was generous of you to share your notes with everyone. | 你真大方，願意把筆記分享給大家。
+hesitate | /ˈhɛzəˌteɪt/ | v. 猶豫；遲疑 | If you have any questions, don't hesitate to ask. | 如果有任何問題，請不要猶豫，儘管發問。
+impression | /ɪmˈprɛʃən/ | n. 印象；感想 | She made a great first impression at the interview. | 她在面試時給人很好的第一印象。
+influence | n. 影響（力）；v. 影響 | My grandmother has had a great influence on my life. | 我奶奶對我的人生影響很大。
+maintain | /meɪnˈteɪn/ | v. 維持；保持；保養 | It's important to maintain a healthy balance between study and rest. | 在讀書和休息之間保持健康的平衡很重要。
+negotiate | /nɪˈgoʊʃiˌeɪt/ | v. 談判；協商 | I negotiated with my parents for a later curfew. | 我跟爸媽協商，希望門禁可以晚一點。
+obvious | adj. 明顯的；顯而易見的 | It was obvious that she was upset. | 很明顯她心情不好。
+participate | /pɑrˈtɪsəˌpeɪt/ | v. 參加；參與 | More than 200 students participated in the school's charity run. | 超過兩百名學生參加了學校的公益路跑。
+persuade | /pɚˈsweɪd/ | v. 說服；勸服 | I finally persuaded my dad to let me go to the concert. | 我終於說服爸爸讓我去聽演唱會。 | persuade sb. to + V 說服某人做……
+priority | /praɪˈɔrəti/ | n. 優先（事項）；首要之務 | Getting enough sleep should be your top priority. | 睡飽應該是你的第一要務。
+reluctant | /rɪˈlʌktənt/ | adj. 不情願的；勉強的 | He was reluctant to admit his mistake. | 他不太願意承認自己的錯誤。 | be reluctant to + V 不情願做……
+reputation | /ˌrɛpjəˈteɪʃən/ | n. 名聲；聲譽；口碑 | This restaurant has a good reputation for its beef noodles. | 這家餐廳的牛肉麵口碑很好。
+sufficient | /səˈfɪʃənt/ | adj. 足夠的；充分的 | We didn't have sufficient time to finish the experiment in class. | 我們上課時沒有足夠的時間把實驗做完。
+tolerate | v. 容忍；忍受 | I can't tolerate people who cut in line. | 我無法忍受插隊的人。
+vivid | adj. 生動的；鮮明的 | I still have vivid memories of my first day of high school. | 我對高中開學第一天的記憶到現在還很鮮明。
+witness | /ˈwɪtnəs/ | n. 目擊者；證人；v. 目擊；見證 | Several people witnessed the accident on their way to school. | 好幾個人在上學途中目擊了那場車禍。

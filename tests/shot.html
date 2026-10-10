@@ -1,0 +1,526 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>單字卡 screenshot scenario</title>
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #8A8A8A; }
+  iframe { position: fixed; left: 0; top: 0; border: 0; display: block; background: #FFF; }
+</style>
+</head>
+<body>
+<script>
+/*
+ * Screenshot scenario harness (used by tests/shots.py).
+ *   shot.html?s=<scenario>&w=390&h=844[&safe=1][&touch=0|1]
+ * Loads the app in a w×h iframe at the top-left corner (fresh ?sk storage key), seeds
+ * data through window.VCApp, drives the UI into the named state, then sets the page
+ * title to "READY <scenario>" (or "ERROR …"). shots.py crops the screenshot to w×h.
+ * The app clock and its random numbers are fixed (VCApp.setClock / setRandom), so the same
+ * scenario always shows the same quiz questions in the same order.
+ *   safe=1   simulate an iPhone in standalone mode (safe-area insets 47px top / 34px bottom)
+ *   touch    hide keyboard hints (and the 1–4 keys on quiz options) like a phone does
+ *            (default: on below 600px width)
+ */
+(function () {
+  'use strict';
+
+  const P = new URLSearchParams(location.search);
+  const NAME = P.get('s') || 'home';
+  const WIDTH = +P.get('w') || 390;
+  const HEIGHT = +P.get('h') || 844;
+  const SAFE = P.get('safe') === '1';
+  const TOUCH = P.has('touch') ? P.get('touch') === '1' : WIDTH < 600;
+
+  const NOW = new Date();
+  const at = (day, h, m) => new Date(NOW.getFullYear(), NOW.getMonth(), NOW.getDate() + day, h, m || 0, 0).getTime();
+  const T = at(0, 19, 30); // the app clock: today 19:30
+  const HOUR = 3600000;
+  const DAY = 24 * HOUR;
+
+  const UNIT3 = [
+    '#deck: 英文課本 Unit 3',
+    'journey | /ˈdʒɝni/ | n. 旅程 | Life is a long journey. | 人生是一段漫長的旅程。',
+    'explore | /ɪkˈsplɔr/ | v. 探索 | We explored the old town on foot. | 我們徒步探索了老城區。',
+    'destination | /ˌdɛstəˈneɪʃən/ | n. 目的地 | Paris is a popular destination. | 巴黎是熱門的旅遊目的地。',
+    'luggage | /ˈlʌgɪdʒ/ | n. 行李 | Don\'t leave your luggage unattended. | 別把行李放著不管。',
+    'souvenir | /ˌsuvəˈnɪr/ | n. 紀念品 | I bought a souvenir for my sister. | 我買了一個紀念品給妹妹。',
+    'passport | /ˈpæsˌpɔrt/ | n. 護照 | Remember to bring your passport. | 記得帶護照。',
+    'itinerary | /aɪˈtɪnəˌrɛri/ | n. 行程 | Our itinerary includes three cities. | 我們的行程包含三個城市。',
+    'scenery | /ˈsinəri/ | n. 風景 | The scenery here is breathtaking. | 這裡的風景美得令人屏息。',
+  ].join('\n');
+
+  const TOEIC = [
+    '#deck: 多益核心單字',
+    'agenda | /əˈdʒɛndə/ | n. 議程 | What\'s on the agenda for today\'s meeting? | 今天會議的議程是什麼？',
+    'budget | /ˈbʌdʒɪt/ | n. 預算 | We need to stay within budget. | 我們必須控制在預算內。',
+    'deadline | /ˈdɛdˌlaɪn/ | n. 截止期限 | The deadline is next Friday. | 截止日期是下週五。',
+    'invoice | /ˈɪnvɔɪs/ | n. 發票；請款單 | Please send us the invoice by email. | 請用電子郵件寄發票給我們。',
+    'negotiate | /nɪˈgoʊʃiˌeɪt/ | v. 談判；協商 | They negotiated a better price. | 他們談到了更好的價格。',
+    'postpone | /poʊstˈpoʊn/ | v. 延期 | The meeting was postponed until Monday. | 會議延到星期一。',
+    'revenue | /ˈrɛvəˌnu/ | n. 營收 | Revenue rose by ten percent. | 營收成長了百分之十。',
+    'schedule | /ˈskɛdʒul/ | n. 時間表；v. 安排 | Let\'s schedule a call for tomorrow. | 我們安排明天通個電話吧。',
+  ].join('\n');
+
+  // A deck of my own: some examples miss the word (took / bought), two words have none.
+  const MINE = [
+    '#deck: 我的單字',
+    'take | /teɪk/ | v. 拿；帶 | He took the last cookie. | 他拿走了最後一塊餅乾。',
+    'buy | /baɪ/ | v. 買 | I bought a new bike. | 我買了一台新腳踏車。',
+    'curious | /ˈkjʊriəs/ | adj. 好奇的 | Children are curious about everything. | 小孩對什麼都好奇。',
+    'brilliant | /ˈbrɪljənt/ | adj. 傑出的；聰明的 | That\'s a brilliant idea! | 那真是個好主意！',
+    'ambition | /æmˈbɪʃən/ | n. 抱負；志向 | Her ambition is to become a doctor. | 她的志向是當醫生。',
+    'eager | adj. 渴望的',
+  ].join('\n');
+
+  // No example contains its own word (only irregular forms): no spelling questions at all.
+  const NO_EXAMPLES = [
+    '#deck: 不規則動詞',
+    'take | v. 拿 | He took my umbrella by mistake. | 他不小心拿走了我的雨傘。',
+    'eat | v. 吃 | We ate dinner together. | 我們一起吃了晚餐。',
+    'see | v. 看見 | I saw him yesterday. | 我昨天看到他。',
+    'write | v. 寫',
+  ].join('\n');
+
+  const LONG = '#deck: 長內容\nput up with | /pʊt ʌp wɪð/ | phr. 忍受；容忍（不愉快的人或事）\\n＝tolerate, endure, stand | ' +
+    'I can\'t put up with the noise from my neighbors any longer; it keeps me awake every night. | ' +
+    '我再也受不了鄰居的噪音了，它讓我每晚都睡不著。 | 常見考法：put up with + N/V-ing（不可接原形動詞）。' +
+    '同義：tolerate / bear / stand / endure。相關片語：put up（搭建；張貼）、put off（延期）、put on（穿上）';
+
+  const PASTE = [
+    '#deck: 英文課本 Unit 4',
+    'ambition | /æmˈbɪʃən/ | n. 抱負；志向 | Her ambition is to become a doctor. | 她的志向是當醫生。',
+    'brilliant | /ˈbrɪljənt/ | adj. 傑出的；聰明的 | That\'s a brilliant idea! | 那真是個好主意！',
+    'curious | /ˈkjʊriəs/ | adj. 好奇的 | Children are curious about everything. | 小孩對什麼都好奇。',
+    'dedicate | v. 奉獻；致力於',
+    'eager adj. 渴望的',
+    '#deck: 範例・高中常用單字',
+    'abandon | v. 拋棄；放棄',
+    'flexible | /ˈflɛksəbəl/ | adj. 有彈性的',
+    'this line has no meaning',
+  ].join('\n');
+
+  const CHAT = [
+    '好的！以下是 4 個學測 Level 4 單字：',
+    '',
+    '| 單字 | 音標 | 詞性 | 中文 |',
+    '|---|---|---|---|',
+    '| **abundant** | /əˈbʌndənt/ | adj. | 豐富的；大量的 |',
+    '| **accompany** | /əˈkʌmpəni/ | v. | 陪伴；伴隨 |',
+    '',
+    '1. **adequate** (adj.) 足夠的',
+    '- **advocate** /ˈædvəkət/ v. 提倡',
+  ].join('\n');
+
+  const REPLY = [
+    '好的！以下是學測 Level 4 第 1 回的 4 個單字：',
+    '',
+    '```text',
+    '#deck: 學測 Level 4・第 1 回',
+    'abolish | /əˈbɑlɪʃ/ | v. 廢除 | They voted to abolish the rule. | 他們投票廢除了那條規定。',
+    'absorb | /əbˈsɔrb/ | v. 吸收 | Plants absorb water through their roots. | 植物用根吸收水分。',
+    'present | /ˈprɛzənt/ (n.) /prɪˈzɛnt/ (v.) | n. 禮物；v. 呈現 | She presented her plan to the class. | 她向全班報告她的計畫。',
+    'academic | /ˌækəˈdɛmɪk/ | adj. 學術的 | Her academic results are excellent. | 她的學業成績很優秀。',
+    '```',
+    '',
+    '需要我再做第 2 回嗎？',
+  ].join('\n');
+
+  /* ------------------------------------------------------------------ helpers */
+  let frame;
+  const W = () => frame.contentWindow;
+  const D = () => frame.contentDocument;
+  const $ = (sel) => D().querySelector(sel);
+  const $$ = (sel) => Array.prototype.slice.call(D().querySelectorAll(sel));
+  const act = (name) => $('[data-action="' + name + '"]');
+  const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+  const S = () => W().VCApp.getState();
+
+  async function waitFor(pred, label, timeout) {
+    const t0 = performance.now();
+    for (;;) {
+      let v = false;
+      try { v = pred(); } catch (e) { v = false; }
+      if (v) return v;
+      if (performance.now() - t0 > (timeout || 5000)) throw new Error('timed out waiting for ' + label);
+      await sleep(20);
+    }
+  }
+
+  function click(target) {
+    const el = typeof target === 'string' ? act(target) : target;
+    if (!el) throw new Error('missing element ' + target);
+    el.click();
+  }
+
+  function setValue(el, value) {
+    el.value = value;
+    el.dispatchEvent(new (W().Event)('input', { bubbles: true }));
+    el.dispatchEvent(new (W().Event)('change', { bubbles: true }));
+  }
+
+  const screenIs = (name) => waitFor(() => {
+    const m = $('main.screen');
+    return m && m.getAttribute('data-screen') === name && !$('.overlay');
+  }, 'screen ' + name);
+
+  async function openSheet(action) {
+    click(action);
+    await waitFor(() => $('.overlay[data-overlay="sheet"]'), 'sheet');
+  }
+
+  const deckId = (name) => S().decks.find((d) => d.name === name).id;
+  const SAMPLE = () => W().VC_SAMPLE.name;
+  const cardsOf = (s, d) => s.cards.filter((c) => c.deckId === d.id).sort((a, b) => a.seq - b.seq);
+
+  /** Three decks: the sample (at card 12, both quizzes done, a few wrong answers), Unit 3, TOEIC. */
+  function seedRich(theme) {
+    const app = W().VCApp;
+    app.importText(W().VC_SAMPLE.text, { deckName: SAMPLE() });
+    app.importText(UNIT3, {});
+    app.importText(TOEIC, {});
+    const s = S();
+    const sample = s.decks[0];
+    sample.flash.index = 11;
+    sample.lastQuiz = { choice: { score: 8, total: 10, at: T - DAY }, spell: { score: 6, total: 10, at: T - 3 * HOUR } };
+    s.decks[1].lastQuiz = { choice: { score: 7, total: 8, at: T - 2 * DAY } };
+    const sc = cardsOf(s, sample);
+    sc.slice(0, 20).forEach((c, i) => { c.right = 1 + (i % 3); });
+    [[1, 2], [4, 1], [7, 3], [12, 1]].forEach((p) => { sc[p[0]].wrong = p[1]; });
+    if (theme) s.prefs.theme = theme;
+    app.setState(s);
+  }
+
+  function setTheme(theme) {
+    const s = S();
+    s.prefs.theme = theme;
+    W().VCApp.setState(s);
+  }
+
+  async function openHub(name) {
+    click($('[data-action="deck-open"][data-deck-id="' + deckId(name) + '"]'));
+    await screenIs('deck');
+  }
+
+  async function openCards(name) {
+    await openHub(name);
+    click('hub-cards');
+    await screenIs('cards');
+  }
+
+  async function openQuiz(name, mode) {
+    await openHub(name);
+    click(mode === 'choice' ? 'hub-choice' : 'hub-spell');
+    await screenIs('quiz');
+  }
+
+  async function browseDeck(name) {
+    click($('[data-action="deck-menu"][data-deck-id="' + deckId(name) + '"]'));
+    await waitFor(() => act('sheet-browse'), 'deck menu');
+    await sleep(80);
+    click('sheet-browse');
+    await screenIs('browse');
+  }
+
+  // The quiz question on screen: its card, the index of the right option.
+  const quizCard = () => {
+    const p = $('.quiz-prompt[data-card-id], .quiz-card[data-card-id]');
+    return S().cards.find((c) => c.id === p.getAttribute('data-card-id'));
+  };
+  const correctIndex = () => $$('.opt .opt-text').map((el) => el.textContent)
+    .indexOf(quizCard().meaning.replace(/\s*\n\s*/g, '；'));
+
+  /** A right answer moves on after 900 ms; keep it on screen for the picture. */
+  function holdAutoAdvance() {
+    const w = W();
+    const st = w.setTimeout;
+    w.setTimeout = function (fn, ms) { return ms === 900 ? 0 : st.apply(w, arguments); };
+  }
+
+  async function answerChoice(right) {
+    const ci = correctIndex();
+    click('option-' + (right ? ci : (ci + 2) % $$('.opt').length));
+    await sleep(10);
+  }
+
+  async function spellAnswer(value) {
+    setValue($('#spell-input'), value);
+    click('spell-submit');
+    await sleep(10);
+  }
+
+  /** The answers of a 10-question choice quiz on the sample deck: 8 right, then the results. */
+  async function choiceResults(theme) {
+    seedRich(theme);
+    await openQuiz(SAMPLE(), 'choice');
+    for (let i = 0; i < 10; i++) {
+      await answerChoice(i !== 2 && i !== 6);
+      click('quiz-next');
+      await sleep(10);
+    }
+    await waitFor(() => $('#quiz-results'), 'results');
+  }
+
+  async function spellWrong(theme) {
+    seedRich(theme);
+    await openQuiz(SAMPLE(), 'spell');
+    await spellAnswer('acurate');
+    if (!$('.quiz-feedback.bad')) { // a different word came up: any wrong spelling will do
+      click('quiz-next');
+      await spellAnswer('xx');
+    }
+  }
+
+  /* ---------------------------------------------------------------- scenarios */
+  const SCENARIOS = {
+    'home-empty': async () => {},
+    'home-empty-dark': async () => { setTheme('dark'); },
+    'home-empty-ios': async () => { W().VCApp.setPlatform({ ios: true, standalone: false }); },
+    'home': async () => { seedRich(); },
+    'home-dark': async () => { seedRich('dark'); },
+    'home-ios-tip': async () => { seedRich(); W().VCApp.setPlatform({ ios: true, standalone: false }); },
+    'deck-menu': async () => {
+      seedRich();
+      click($('[data-action="deck-menu"][data-deck-id="' + deckId(SAMPLE()) + '"]'));
+      await waitFor(() => act('sheet-browse'), 'deck menu');
+    },
+    'confirm-dialog': async () => {
+      seedRich();
+      click($('[data-action="deck-menu"][data-deck-id="' + deckId('多益核心單字') + '"]'));
+      await waitFor(() => act('sheet-delete'), 'deck menu');
+      await sleep(80);
+      click('sheet-delete');
+      await waitFor(() => $('.overlay[data-overlay="modal"]'), 'modal');
+    },
+
+    // Deck hub
+    'hub': async () => { seedRich(); await openHub(SAMPLE()); },
+    'hub-dark': async () => { seedRich('dark'); await openHub(SAMPLE()); },
+    'hub-small': async () => {
+      seedRich();
+      W().VCApp.importText(MINE, {});
+      const s = S();
+      s.decks.find((d) => d.name === '我的單字').lastQuiz = { choice: { score: 5, total: 6, at: T - DAY } };
+      W().VCApp.setState(s);
+      await openHub('我的單字');
+    },
+    'hub-nospell': async () => {
+      W().VCApp.importText(NO_EXAMPLES, {});
+      await openHub('不規則動詞');
+    },
+    'hub-empty': async () => {
+      seedRich();
+      const s = S();
+      s.decks.push({ id: 'empty1', name: '我的新牌組', created: T, settings: { direction: 'en2zh' } });
+      W().VCApp.setState(s);
+      await openHub('我的新牌組');
+    },
+
+    // Flashcards
+    'flash-front': async () => { seedRich(); await openCards(SAMPLE()); },
+    'flash-back': async () => { seedRich(); await openCards(SAMPLE()); click('flip'); },
+    'flash-back-dark': async () => { seedRich('dark'); await openCards(SAMPLE()); click('flip'); },
+    'flash-zh2en': async () => {
+      seedRich();
+      const s = S();
+      s.decks[2].settings.direction = 'zh2en';
+      W().VCApp.setState(s);
+      await openCards('多益核心單字');
+    },
+    'flash-long': async () => {
+      // Long meaning, example and note: the card scrolls, the buttons stay in reach.
+      W().VCApp.importText(LONG, {});
+      await openCards('長內容');
+      click('flip');
+    },
+    'flash-end': async () => {
+      seedRich();
+      await openCards('英文課本 Unit 3');
+      for (let i = 0; i < 8; i++) click('next');
+      await waitFor(() => $('#flash-end'), 'end view');
+    },
+
+    // Choice quiz (sample deck)
+    'quiz-choice': async () => { seedRich(); await openQuiz(SAMPLE(), 'choice'); },
+    'quiz-choice-correct': async () => {
+      seedRich();
+      await openQuiz(SAMPLE(), 'choice');
+      holdAutoAdvance();
+      await answerChoice(true);
+    },
+    'quiz-choice-wrong': async () => { seedRich(); await openQuiz(SAMPLE(), 'choice'); await answerChoice(false); },
+    'quiz-choice-wrong-dark': async () => { seedRich('dark'); await openQuiz(SAMPLE(), 'choice'); await answerChoice(false); },
+    'quiz-quit': async () => {
+      seedRich();
+      await openQuiz(SAMPLE(), 'choice');
+      await answerChoice(false);
+      click('quiz-next');
+      await sleep(10);
+      click('quiz-quit');
+      await waitFor(() => $('.overlay[data-overlay="modal"]'), 'modal');
+    },
+
+    // Spelling quiz (sample deck)
+    'quiz-spell': async () => { seedRich(); await openQuiz(SAMPLE(), 'spell'); },
+    'quiz-spell-typing': async () => {
+      seedRich();
+      await openQuiz(SAMPLE(), 'spell');
+      setValue($('#spell-input'), quizCard().word.slice(0, 4));
+      $('#spell-input').focus();
+    },
+    'quiz-spell-correct': async () => {
+      seedRich();
+      await openQuiz(SAMPLE(), 'spell');
+      holdAutoAdvance();
+      await spellAnswer(W().VC.makeCloze(quizCard()).answer);
+    },
+    'quiz-spell-wrong': async () => { await spellWrong(); },
+    'quiz-spell-wrong-dark': async () => { await spellWrong('dark'); },
+    'quiz-empty': async () => {
+      W().VCApp.importText(NO_EXAMPLES, {});
+      W().location.hash = '#/quiz/' + encodeURIComponent(deckId('不規則動詞')) + '/spell';
+      await screenIs('quiz');
+    },
+
+    // Results
+    'quiz-results': async () => { await choiceResults(); },
+    'quiz-results-dark': async () => { await choiceResults('dark'); },
+    'quiz-results-spell': async () => {
+      seedRich();
+      await openQuiz(SAMPLE(), 'spell');
+      for (let i = 0; i < 10; i++) {
+        if (i === 1 || i === 4 || i === 8) click('spell-giveup');
+        else await spellAnswer(W().VC.makeCloze(quizCard()).answer);
+        click('quiz-next');
+        await sleep(10);
+      }
+      await waitFor(() => $('#quiz-results'), 'results');
+    },
+
+    // Browse / edit
+    'browse': async () => { seedRich(); await browseDeck(SAMPLE()); },
+    'browse-dark': async () => { seedRich('dark'); await browseDeck(SAMPLE()); },
+    'edit-sheet': async () => {
+      seedRich();
+      await browseDeck(SAMPLE());
+      const c = S().cards.find((x) => x.word === 'anxiety');
+      click($('[data-action="card-row"][data-card-id="' + c.id + '"]'));
+      await waitFor(() => $('#f-word'), 'editor');
+    },
+    'add-sheet': async () => {
+      seedRich();
+      await browseDeck('多益核心單字');
+      await openSheet('add-card');
+    },
+    'deck-settings': async () => {
+      seedRich();
+      await openHub(SAMPLE());
+      await openSheet('deck-settings');
+    },
+
+    // Import
+    'import': async () => {
+      seedRich();
+      click('open-import');
+      await screenIs('import');
+    },
+    'import-preview': async () => {
+      seedRich();
+      click('open-import');
+      await screenIs('import');
+      setValue($('#import-text'), PASTE);
+      $('details.errors') && ($('details.errors').open = true);
+      const top = $('.or-line').getBoundingClientRect().top + D().scrollingElement.scrollTop;
+      D().scrollingElement.scrollTop = top - 64;
+    },
+    'import-chat': async () => {
+      // What a student pastes from a Claude / ChatGPT answer that ignored the format rules.
+      seedRich();
+      click('open-import');
+      await screenIs('import');
+      setValue($('#import-text'), CHAT);
+      const top = $('.or-line').getBoundingClientRect().top + D().scrollingElement.scrollTop;
+      D().scrollingElement.scrollTop = top - 64;
+    },
+    'import-help': async () => {
+      seedRich();
+      click('open-import');
+      await screenIs('import');
+      $('details.help').open = true;
+      const top = $('details.help').getBoundingClientRect().top + D().scrollingElement.scrollTop;
+      D().scrollingElement.scrollTop = top - 64;
+    },
+    'import-reply': async () => {
+      // A whole Claude reply copied with its chat text around the ``` block.
+      seedRich();
+      click('open-import');
+      await screenIs('import');
+      setValue($('#import-text'), REPLY);
+      const top = $('.or-line').getBoundingClientRect().top + D().scrollingElement.scrollTop;
+      D().scrollingElement.scrollTop = top - 64;
+    },
+
+    // Settings
+    'settings': async () => { seedRich(); click('open-settings'); await screenIs('settings'); },
+    'settings-bottom': async () => {
+      seedRich();
+      click('open-settings');
+      await screenIs('settings');
+      D().scrollingElement.scrollTop = D().scrollingElement.scrollHeight;
+    },
+    'settings-dark': async () => { seedRich('dark'); click('open-settings'); await screenIs('settings'); },
+  };
+
+  /* ------------------------------------------------------------------ runner */
+  async function run() {
+    const scenario = SCENARIOS[NAME];
+    if (!scenario) throw new Error('unknown scenario: ' + NAME);
+    frame = document.createElement('iframe');
+    frame.style.width = WIDTH + 'px';
+    frame.style.height = HEIGHT + 'px';
+    frame.src = '../index.html?sk=' + encodeURIComponent('shot-' + NAME + '-' + Date.now().toString(36));
+    const loaded = new Promise((resolve) => frame.addEventListener('load', resolve, { once: true }));
+    document.body.appendChild(frame);
+    await loaded;
+    // index.html shows .fatal when a script did not load: fail now (shots.py retries), well
+    // within the virtual-time budget, instead of photographing the error page.
+    await waitFor(() => (W().VCApp && $('main.screen')) || $('.fatal'), 'app boot', 8000);
+    if (!W().VCApp) throw new Error('the app scripts did not load');
+
+    // No animations or transitions: under --virtual-time-budget headless Edge may not advance
+    // them, and the screenshot would catch a fade midway. Every element shows its final state.
+    const css = '*, *::before, *::after { animation: none !important; transition: none !important; }\n' +
+      (TOUCH ? '.kbd-hint, .opt-key { display: none !important; }\n' : '') +
+      (SAFE ? ':root { --safe-top: 47px !important; --safe-bottom: 34px !important; }\n' : '');
+    const style = D().createElement('style');
+    style.textContent = css;
+    D().head.appendChild(style);
+    W().VCApp.setClock(() => T);
+    W().VCApp.setRandom(W().VC.seededRng(7));
+    W().VCApp.render();
+    await sleep(50);
+    await scenario();
+    await sleep(900); // let entry animations and toasts settle
+    const toasts = $('#toasts');
+    while (toasts && toasts.firstChild) toasts.removeChild(toasts.firstChild);
+    // A tap does not leave a focus ring on buttons; programmatic focus in headless Edge does.
+    const active = D().activeElement;
+    if (active && active.tagName === 'BUTTON') active.blur();
+    await sleep(100);
+    document.title = 'READY ' + NAME;
+  }
+
+  run().catch((e) => {
+    document.title = 'ERROR ' + NAME + ': ' + (e && e.message);
+    // Make failures impossible to miss in the screenshot itself.
+    const banner = document.createElement('pre');
+    banner.textContent = document.title + '\n' + ((e && e.stack) || '');
+    banner.style.cssText = 'position:fixed;left:0;top:0;right:0;z-index:9;margin:0;padding:12px;' +
+      'background:#B00020;color:#FFF;font:12px/1.4 monospace;white-space:pre-wrap;';
+    document.body.appendChild(banner);
+  });
+})();
+</script>
+</body>
+</html>
