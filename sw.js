@@ -3,14 +3,18 @@
  * Every same-origin GET is answered from the cache when possible while a fresh
  * copy is fetched in the background, so the app opens instantly (and offline)
  * and picks up updated files on the next launch.
- * Bump CACHE when the SHELL list changes; old caches are removed on activate.
- * Files are refreshed one by one, so a launch right after an update can mix versions: app.js
- * compares VC.version (core.js) with its APP_VERSION and, if they differ, deletes these caches
- * and reloads once. Keep the two version numbers equal on every release.
+ *
+ * On every release change VERSION (= VC.version in core.js = APP_VERSION in app.js; tests/e2e.html
+ * checks) and bump CACHE. The changed sw.js makes the browser install a new worker, which
+ * downloads every file again into the new cache (old caches are removed on activate), so the
+ * next launch is the new version as a whole. Between releases files are refreshed one by one; if
+ * a launch still mixes an old core.js with a new app.js, app.js notices the version difference,
+ * deletes these caches and reloads once.
  */
 'use strict';
 
-const CACHE = 'vocabcards-v4';
+const VERSION = '2.1';
+const CACHE = 'vocabcards-v5';
 
 const SHELL = [
   './',

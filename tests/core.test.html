@@ -77,11 +77,11 @@
 
   test('contract: VC exists with every function', () => {
     ok(typeof VC === 'object', 'window.VC defined');
-    ['parseDeckText', 'serializeDeck', 'decodeBytes', 'normalizeWord', 'newCard', 'wordForms', 'headwordRegex',
-     'findHeadword', 'maskWord', 'makeCloze', 'checkSpelling', 'posOf', 'meaningKey', 'shuffle', 'seededRng',
-     'pickChoices', 'buildQuiz', 'quizEligible']
+    ['parseDeckText', 'serializeDeck', 'decodeBytes', 'normalizeWord', 'newCard', 'wordForms', 'foldAccents', 'headwordRegex',
+     'findHeadwords', 'findHeadword', 'speakableWord', 'maskWord', 'makeCloze', 'checkSpelling', 'isOtherForm', 'quizMeaning',
+     'posOf', 'meaningKey', 'shuffle', 'seededRng', 'seededOrder', 'pickChoices', 'buildQuiz', 'quizEligible']
       .forEach(fn => ok(typeof VC[fn] === 'function', 'VC.' + fn));
-    eq(VC.version, '2.0', 'VC.version');
+    eq(VC.version, '2.1', 'VC.version');
     eq(VC.DEFAULT_DECK_SETTINGS, { direction: 'en2zh' }, 'DEFAULT_DECK_SETTINGS');
     ['SRS', 'answer', 'previewLabels', 'formatInterval', 'formatDays', 'dueLabel', 'deckCounts', 'nextCard',
      'dayKey', 'dayStart', 'addDays']
@@ -612,6 +612,16 @@
     has('basic', ['basically']);
     has('box', ['boxes']);
     has('quick', ['quickly', 'quicker', 'quickest']);
+    // RL-5 / F8: -ie → -ying, qu + vowel doubling, -ic → -icked, -ll → -lly
+    has('lie', ['lies', 'lied', 'lying']);
+    has('die', ['dying']);
+    has('tie', ['tying']);
+    has('quit', ['quits', 'quitting', 'quitted']);
+    has('equip', ['equipped', 'equipping']);
+    has('panic', ['panics', 'panicked', 'panicking']);
+    has('picnic', ['picnicked']);
+    has('full', ['fully']);
+    lacks('quiet', ['quietted']);
     eq(VC.wordForms('be'), ['be', 'am', 'is', 'are', 'was', 'were', 'been', 'being'], 'be');
     eq(VC.wordForms('have'), ['have', 'has', 'had', 'having'], 'have');
     eq(VC.wordForms('do'), ['do', 'does', 'did', 'done', 'doing'], 'do');
@@ -648,6 +658,21 @@
     eq(all('He gave up, then gives up again.', 'give up'), [[17, 'gives up']], 'phrase');
     ok(VC.headwordRegex('a.b*c(d)?') === null || VC.headwordRegex('a.b*c(d)?') instanceof RegExp, 'special characters are safe');
     eq(all('Is a.b here? ab', 'a.b'), [], 'a dot in the word is not a wildcard');
+    const m = VC.headwordRegex('give up').exec('She is giving up.');
+    eq([m[1], m[2], m[3]], [' ', 'giving up', 'giving'], 'groups: the character in front, the headword, its first word');
+    eq(all('In 3D printing, 3d models', '3D printing'), [[3, '3D printing']], 'digits are part of the word (F8)');
+  });
+
+  test('findHeadwords: every occurrence with its tier (F5)', () => {
+    const fa = VC.findHeadwords;
+    eq(fa('She wrote a letter and let me read it.', 'let'),
+       [{ index: 12, text: 'letter', tier: 2 }, { index: 23, text: 'let', tier: 0 }], 'letter is a form of let (tier 2), let itself tier 0');
+    eq(fa('He abandons it, then abandoned it.', 'abandon').map(x => x.tier), [1, 1], '-s / -ed: tier 1');
+    eq(fa('We met at a café. Cafe owners…', 'cafe'), [{ index: 12, text: 'café', tier: 0 }, { index: 18, text: 'Cafe', tier: 0 }],
+       'accents do not matter; text = the exact substring (F8)');
+    eq(fa('Résumé here', 'résumé'), [{ index: 0, text: 'Résumé', tier: 0 }], 'decomposed accents in the sentence');
+    eq(fa('', 'let'), [], 'empty sentence');
+    eq(fa('let it be', ''), [], 'empty word');
   });
 
   test('findHeadword: inflections', () => {
@@ -676,10 +701,65 @@
     eq(fh('Give Up now.', 'GIVE UP'), { index: 0, text: 'Give Up' }, 'case-insensitive');
     eq(fh("I'm looking forward to the trip.", 'look forward to'), { index: 4, text: 'looking forward to' }, 'three words');
     eq(fh('She takes care of her dog.', 'take care of sth'), { index: 4, text: 'takes care of' }, 'sth left out');
-    eq(fh('He is good at math.', 'be good at sth.'), { index: 3, text: 'is good at' }, 'be + sth.');
+    eq(fh('He is good at math.', 'be good at sth.'), { index: 6, text: 'good at' }, 'be + sth.: be is not asked (RL-4)');
     eq(fh('Please pay attention to the teacher.', "pay attention to sb's"), { index: 7, text: 'pay attention to' }, "sb's left out");
-    eq(fh('Try to make up your mind.', "make up one’s mind"), null, "one’s left out: the rest must follow literally");
+    eq(fh('Try to make up your mind.', "make up one’s mind"), { index: 7, text: 'make up your mind' }, "one’s = your (RL-3)");
     eq(fh('Is someone there?', 'someone'), { index: 3, text: 'someone' }, 'a placeholder word alone is the word itself');
+  });
+
+  test('findHeadword: stand-ins, patterns and alternatives (RL-3, F8)', () => {
+    const fh = (s, w) => { const x = VC.findHeadword(s, w); return x && x.text; };
+    eq(fh('This song reminds me of my childhood.', 'remind sb of sth'), 'reminds', 'remind sb of sth: up to sb');
+    eq(fh("I'm looking forward to seeing you again.", 'look forward to + V-ing'), 'looking forward to', '+ V-ing left out');
+    eq(fh('She is devoted to helping others.', 'be devoted to + N / V-ing'), 'devoted to', '+ N / V-ing left out, be not asked');
+    eq(fh('The government designated the temple as a heritage site.', 'designate A as B'), 'designated', 'A … B: up to A');
+    eq(fh('They came to send the goddess off.', 'send sb off'), 'send', 'send sb off');
+    eq(fh('Not only is it fun, but it is also cheap.', 'not only A but also B'), 'Not only', 'not only A but also B');
+    eq(fh('He did not leave until noon.', 'not … until …'), 'not', 'an ellipsis is a stand-in');
+    eq(fh('It is no exaggeration to say that it works.', 'It is no exaggeration to say that…'), 'It is no exaggeration to say that', 'a trailing …');
+    eq(fh('We are looking to expand.', 'be looking to V'), 'looking to', 'V after to');
+    eq(fh('She is enthusiastic about music.', 'be enthusiastic about = be passionate about'), 'enthusiastic about', '= alternatives');
+    eq(fh('Over the years, the town grew.', 'Over the years ≈ in recent years'), 'Over the years', '≈ alternatives');
+    eq(fh('People cast wooden blocks.', 'cast (wooden) blocks'), 'cast wooden blocks', 'a bracketed word may be there …');
+    eq(fh('People cast blocks.', 'cast (wooden) blocks'), 'cast blocks', '… or not');
+    eq(fh('We set out from Dajia.', 'set out (from)'), 'set out from', 'a bracketed last word');
+    eq(fh('It prevents us from going.', 'prevent sb from + V-ing'), 'prevents', 'prevent sb from + V-ing');
+    eq(fh('Stand by me. He did it by himself.', 'by oneself'), 'by himself', 'oneself = himself');
+    eq(fh('Our Plan B worked.', 'Plan B'), 'Plan B', 'a lone B is a word');
+    eq(fh('My blood type is A.', 'type A'), null, '… and so is a lone A (not in this sentence)');
+    eq(fh('It is a scene like no other.', 'a scene like no other'), 'a scene like no other', 'the article a stays');
+    eq(fh('Someone else did it.', 'someone else'), 'Someone else', 'someone at the start is a word (F8)');
+    eq(fh('Ask a friend or something.', 'or something'), 'or something', 'something after a short word is a word (F8)');
+    eq(fh('Please take care of someone.', 'take care of someone'), 'take care of', 'someone after the phrase is a stand-in');
+    eq(fh('We use 3D printing now.', '3D printing'), '3D printing', 'digits (F8)');
+    eq(fh('We met at a cafe.', 'café'), 'cafe', 'accents (F8)');
+  });
+
+  test('findHeadword: be-phrases and plural compounds (RL-4, RL-5)', () => {
+    const fh = (s, w) => { const x = VC.findHeadword(s, w); return x && x.text; };
+    eq(fh('Most students are accustomed to studying late at night.', 'be accustomed to'), 'accustomed to', 'be is not asked');
+    eq(fh("She's capable of finishing it on her own.", 'be capable of'), 'capable of', 'contraction');
+    eq(fh('Most teenagers are well aware of the dangers of smoking.', 'be aware of'), 'aware of', 'adverb in between');
+    eq(fh('Are you aware of the risks?', 'be aware of'), 'aware of', 'question');
+    eq(fh('They were late again.', 'be'), 'were', 'be alone keeps its forms');
+    eq(fh('Parents should be good role models for their children.', 'role model'), 'role models', 'plural compound');
+    eq(fh('She loves reading fairy tales.', 'fairy tale'), 'fairy tales', 'fairy tales');
+    eq(fh('Tourist attractions are crowded.', 'tourist attraction'), 'Tourist attractions', 'capitalised plural');
+    eq(fh('The two big cities are busy.', 'big city'), 'big cities', 'y → ies');
+    eq(fh('The passengers panicked when the train stopped.', 'panic'), 'panicked', 'panicked');
+    eq(fh('He was lying on the sofa.', 'lie'), 'lying', 'lying');
+    eq(fh('He is thinking about quitting his job.', 'quit'), 'quitting', 'quitting');
+    eq(fh('He was fully aware.', 'full'), 'fully', 'fully');
+  });
+
+  test('findHeadword: the word itself before other forms (F5)', () => {
+    const fh = (s, w) => { const x = VC.findHeadword(s, w); return x && [x.index, x.text]; };
+    eq(fh('She wrote a letter and let me read it.', 'let'), [23, 'let'], 'let, not letter');
+    eq(fh('I woke up early because my ear hurt.', 'ear'), [27, 'ear'], 'ear, not early');
+    eq(fh("Look up the meaning if you don't know what I mean.", 'mean'), [45, 'mean'], 'mean, not meaning');
+    eq(fh('It is likely that he liked it.', 'like'), [21, 'liked'], '-ed before -ly');
+    eq(fh('He hardly worked; it was hard.', 'hard'), [25, 'hard'], 'hard, not hardly');
+    eq(fh('Let me read the letter.', 'let'), [0, 'Let'], 'the first when it is the word itself');
   });
 
   test('findHeadword: word cleanup', () => {
@@ -742,13 +822,12 @@
 
   test('makeCloze', () => {
     const card = (word, example) => C('c', word, 'v. 放棄', { example });
+    const want = (before, answer, after, masked, hidden) => ({ before, answer, after, masked, hidden, beforeMasked: before, afterMasked: after });
     eq(VC.makeCloze(card('abandon', 'He abandoned his car in the snow.')),
-       { before: 'He ', answer: 'abandoned', after: ' his car in the snow.', masked: 'a_______d', hidden: 7 }, 'abandoned');
-    eq(VC.makeCloze(card('abandon', 'Abandon ship!')),
-       { before: '', answer: 'Abandon', after: ' ship!', masked: 'A_____n', hidden: 5 }, 'at the start, case kept');
-    eq(VC.makeCloze(card('give up', 'She is giving up.')),
-       { before: 'She is ', answer: 'giving up', after: '.', masked: 'g____g u_', hidden: 5 }, 'phrase');
-    eq(VC.makeCloze(card('ox', 'An ox.')), { before: 'An ', answer: 'ox', after: '.', masked: 'o_', hidden: 1 }, '2-letter word');
+       want('He ', 'abandoned', ' his car in the snow.', 'a_______d', 7), 'abandoned');
+    eq(VC.makeCloze(card('abandon', 'Abandon ship!')), want('', 'Abandon', ' ship!', 'A_____n', 5), 'at the start, case kept');
+    eq(VC.makeCloze(card('give up', 'She is giving up.')), want('She is ', 'giving up', '.', 'g____g u_', 5), 'phrase');
+    eq(VC.makeCloze(card('ox', 'An ox.')), want('An ', 'ox', '.', 'o_', 1), '2-letter word');
     eq(VC.makeCloze(card('cat', 'A category and a cat.')).before, 'A category and a ', 'whole words only');
     eq(VC.makeCloze(card('abandon', 'Abandon it? He abandoned it.')).before, '', 'first occurrence');
     eq(VC.makeCloze(card('give up', 'He gave up.')), null, 'irregular form → null');
@@ -761,6 +840,20 @@
     eq(z && z.masked, 'w__l-b___g', 'hyphenated mask');
     eq(VC.makeCloze(null), null, 'null card');
     eq(VC.makeCloze({}), null, 'empty card');
+  });
+
+  test('makeCloze: every other occurrence masked too (F6, F5)', () => {
+    const cz = (word, example) => VC.makeCloze({ word, example });
+    let x = cz('practice', 'Practice makes perfect, so practice every day.');
+    eq([x.answer, x.after, x.afterMasked], ['Practice', ' makes perfect, so practice every day.', ' makes perfect, so p______e every day.'],
+       'the second practice is masked');
+    x = cz('abandon', 'They abandoned the plan, but we did not abandon ours.');
+    eq([x.answer, x.beforeMasked, x.afterMasked], ['abandon', 'They a_______d the plan, but we did not ', ' ours.'],
+       'the word itself is asked; the earlier abandoned is masked');
+    x = cz('give up', 'Never give up, and never let others give up.');
+    eq(x.afterMasked, ', and never let others g__e u_.', 'a phrase twice');
+    x = cz('let', 'She wrote a letter and let me read it.');
+    eq([x.answer, x.before + x.answer + x.after], ['let', 'She wrote a letter and let me read it.'], 'let, not letter (F5)');
   });
 
   test('checkSpelling', () => {
@@ -799,6 +892,21 @@
     no(null, 'abandoned', 'null input');
     no('abandoned', '', 'empty answer');
     no('', '', 'both empty');
+    // RL-4: a be-phrase asks only the rest; "be …" as learned counts too.
+    eq(VC.checkSpelling('be accustomed to', 'accustomed to', 'be accustomed to'), true, 'be + the answer, for a be-phrase');
+    eq(VC.checkSpelling('accustomed to', 'accustomed to', 'be accustomed to'), true, 'the answer itself');
+    eq(VC.checkSpelling('be abandoned', 'abandoned', 'abandon'), false, 'not for other words');
+    eq(VC.checkSpelling('are accustomed to', 'accustomed to', 'be accustomed to'), false, 'only be (the form that was learned)');
+  });
+
+  test('isOtherForm (F7)', () => {
+    eq(VC.isOtherForm('perceive', 'perceive', 'perceived'), true, 'the base form for an inflected answer');
+    eq(VC.isOtherForm('Perceives.', 'perceive', 'perceived'), true, 'another form, any case, a final period');
+    eq(VC.isOtherForm('give up', 'give up', 'giving up'), true, 'a phrase');
+    eq(VC.isOtherForm('perceived', 'perceive', 'perceived'), false, 'right is not another form');
+    eq(VC.isOtherForm('percieve', 'perceive', 'perceived'), false, 'misspelt');
+    eq(VC.isOtherForm('perceive it', 'perceive', 'perceived'), false, 'more than the word');
+    eq(VC.isOtherForm('', 'perceive', 'perceived'), false, 'empty');
   });
 
   /* =========================================================== choice quiz */
@@ -814,11 +922,39 @@
   });
 
   test('meaningKey', () => {
-    eq(VC.meaningKey('v. 放棄\n拋棄'), 'v. 放棄；拋棄', 'line break → ；');
-    eq(VC.meaningKey(' v. 放棄 \r\n 拋棄\n'), 'v. 放棄；拋棄', 'CRLF, spaces around, trailing line break');
-    eq(VC.meaningKey('  N.   能力 '), 'n. 能力', 'trim, collapse, lower-case');
+    eq(VC.meaningKey('v. 放棄\n拋棄'), '放棄；拋棄', 'line break → ；, part of speech left out');
+    eq(VC.meaningKey(' v. 放棄 \r\n 拋棄\n'), '放棄；拋棄', 'CRLF, spaces around, trailing line break');
+    eq(VC.meaningKey('  N.   能力 '), '能力', 'trim, spaces, part of speech');
     eq(VC.meaningKey('V. 放棄\n拋棄'), VC.meaningKey('v. 放棄；拋棄'), 'same meaning, same key');
+    // F10: formatting of the part of speech and a final punctuation mark do not make another option.
+    eq(['v. 放棄', 'v.放棄', '(v.) 放棄', 'v. 放棄。', '放棄', 'n./v. 放棄', 'V.  放 棄'].map(VC.meaningKey),
+       ['放棄', '放棄', '放棄', '放棄', '放棄', '放棄', '放棄'], 'part-of-speech labels, spaces and punctuation');
+    eq(VC.meaningKey('To Give Up'), 'togiveup', 'English: case and spaces');
+    eq(VC.meaningKey('n.'), '', 'only a part of speech');
     eq(VC.meaningKey(null), '', 'null');
+  });
+
+  test('quizMeaning: notes that give the English away (RL-1)', () => {
+    const qm = VC.quizMeaning;
+    // The student's real L9 file.
+    eq(qm('n. 燈籠 → Lantern Festival 元宵節'), 'n. 燈籠', 'lantern: → note');
+    eq(qm('v. 參加（+ in）→ participant (n.) 參加者'), 'v. 參加', 'participate: （+ in） and → note');
+    eq(qm('v. 跪下（kneel down）'), 'v. 跪下', 'kneel: English in brackets');
+    eq(qm('n. / v. 轉變（≈ change）'), 'n. / v. 轉變', 'shift: （≈ change）');
+    eq(qm('v. 向…致敬、尊崇（h 不發音）'), 'v. 向…致敬、尊崇', 'honor: （h 不發音）');
+    eq(qm('n. 慷慨 ← generous (adj.)'), 'n. 慷慨', 'generosity: ← note');
+    eq(qm('v. 使團結、統一 → united (adj.)：United States'), 'v. 使團結、統一', 'unify');
+    eq(qm('adj. / n. 特有的 ／ 特色（ch 讀 /k/）'), 'adj. / n. 特有的 ／ 特色', 'characteristic');
+    eq(qm('n. 履歷表（亦作 resume）'), 'n. 履歷表', 'résumé (the 高頻字彙 file)');
+    eq(qm('phr. 忍受；容忍（不愉快的人或事）\n＝tolerate, endure, stand'), 'phr. 忍受；容忍（不愉快的人或事）', 'a line that is only a note goes');
+    // Left as they are.
+    ['v. 放棄；拋棄', 'n. 影響（力）；v. 影響', 'phr. 多年來 ≈ 近年來', 'phr. 不僅 A 而且 B', 'v. 參加 (n.) 參加者',
+     'adj. 安全的 <img src=x onerror="parent.__xss=1">', '[U] 資訊', 'v. / n. 旅行、跋涉 ／ 旅程', 'to give up (something)', '']
+      .forEach(m => eq(qm(m), m, 'unchanged: ' + JSON.stringify(m)));
+    eq(qm('v. 放棄\nn. 放縱'), 'v. 放棄\nn. 放縱', 'line breaks kept');
+    eq(qm('→ give up'), '→ give up', 'nothing Chinese: unchanged');
+    eq(qm('(kneel down) 跪'), '跪', 'a note at the start');
+    eq(qm(null), '', 'null');
   });
 
   test('shuffle', () => {
@@ -870,6 +1006,38 @@
     const b = VC.seededRng(5);
     a(); a();
     eq(b(), seq(5, 1)[0], 'generators are independent');
+  });
+
+  test('seededOrder: stable when cards are added or deleted (F4)', () => {
+    const cards = Array.from({ length: 40 }, (_, i) => C('id' + i, 'w' + i, 'n. ' + i));
+    const ids = list => list.map(c => c.id);
+    const order = VC.seededOrder(cards, 12345);
+    eq(order.length, 40, 'every card');
+    eq(ids(order).slice().sort(), ids(cards).slice().sort(), 'the same cards');
+    eq(ids(VC.seededOrder(cards, 12345)), ids(order), 'same seed → same order');
+    ok(ids(order).join() !== ids(cards).join(), 'shuffled');
+    ok(ids(VC.seededOrder(cards, 999)).join() !== ids(order).join(), 'another seed → another order');
+    const without = cards.filter(c => c.id !== 'id17');
+    eq(ids(VC.seededOrder(without, 12345)), ids(order).filter(id => id !== 'id17'), 'a card deleted: the others keep their order');
+    const added = cards.concat([C('new1', 'zebra', 'n. 斑馬')]);
+    eq(ids(VC.seededOrder(added, 12345)).filter(id => id !== 'new1'), ids(order), 'a card added: the others keep their order');
+    eq(ids(VC.seededOrder(cards.slice().reverse(), 12345)), ids(order), 'the order does not depend on the input order');
+    eq(VC.seededOrder(null, 1), [], 'null → []');
+    const frozen = Object.freeze(cards.slice());
+    VC.seededOrder(frozen, 3);
+    eq(ids(frozen), ids(cards), 'input unchanged');
+  });
+
+  test('speakableWord (RL-8)', () => {
+    const sw = VC.speakableWord;
+    [['abandon', 'abandon'], ['give up', 'give up'], ['send sb off', 'send somebody off'], ['remind sb of sth', 'remind somebody of something'],
+     ["take sb's place", "take somebody's place"], ['be devoted to + N / V-ing', 'be devoted to'], ['over the course of + 時間', 'over the course of'],
+     ['set out (from)', 'set out from'], ['cast (wooden) blocks', 'cast wooden blocks'], ['abandon (v.)', 'abandon'],
+     ['be enthusiastic about = be passionate about', 'be enthusiastic about'], ['Over the years ≈ in recent years', 'Over the years'],
+     ['not only A but also B', 'not only but also'], ['designate A as B', 'designate as'], ['be looking to V', 'be looking to'],
+     ['not … until …', 'not, until'], ['It is no exaggeration to say that…', 'It is no exaggeration to say that'],
+     ['color / colour', 'color'], ['Plan B', 'Plan B'], ['someone else', 'someone else'], ['燈籠', '燈籠'], ['', '']]
+      .forEach(([w, want]) => eq(sw(w), want, JSON.stringify(w)));
   });
 
   test('pickChoices: options and answerIndex', () => {
@@ -934,10 +1102,54 @@
     for (let s = 0; s < 100 && !bad; s++) {
       const q = VC.pickChoices(card2, dup, RNG(s));
       const keys = q.options.map(VC.meaningKey);
-      if (q.options.length !== 3 || new Set(keys).size !== 3 || keys.filter(k => k === 'v. 放棄；拋棄').length !== 1 ||
-          q.options[q.answerIndex] !== 'v. 放棄；拋棄' || keys.indexOf('n. 能力') === -1) bad = s + ': ' + JSON.stringify(q);
+      if (q.options.length !== 3 || new Set(keys).size !== 3 || keys.filter(k => k === '放棄；拋棄').length !== 1 ||
+          q.options[q.answerIndex] !== 'v. 放棄；拋棄' || keys.indexOf('能力') === -1) bad = s + ': ' + JSON.stringify(q);
     }
     ok(!bad, 'distinct by meaningKey (case, spaces, line breaks); fewer options when the pool runs out', bad);
+  });
+
+  test('pickChoices: the same meaning in another form, shared senses (F10)', () => {
+    const card = C('a', 'abandon', 'v. 放棄');
+    const same = [C('g', 'give up', '放棄'), C('q', 'quit', 'v.放棄'), C('d', 'desert', '(v.) 放棄'), C('p', 'drop', 'v. 放棄。')];
+    eq(VC.pickChoices(card, same, RNG(0)), { options: ['v. 放棄'], answerIndex: 0 }, 'v. 放棄 / 放棄 / v.放棄 / (v.) 放棄 / 放棄。 are one option');
+    const more = same.concat([C('b', 'absorb', 'v. 吸收'), C('c', 'accept', 'v. 接受'), C('h', 'achieve', 'v. 達成')]);
+    let bad = null;
+    for (let s = 0; s < 50 && !bad; s++) {
+      const q = VC.pickChoices(card, more, RNG(s));
+      if (q.options.length !== 4 || q.options.filter(o => VC.meaningKey(o) === '放棄').length !== 1) bad = s + ': ' + JSON.stringify(q);
+    }
+    ok(!bad, 'one 放棄 option plus three others', bad);
+    // The real L9 deck: devotion and dedication share 奉獻.
+    const devotion = C('v', 'devotion', 'n. 虔誠、奉獻 → be devoted to + N / V-ing');
+    const pool = [devotion, C('x', 'dedication', 'n. 奉獻、投入'), C('y', 'goddess', 'n. 女神'), C('z', 'temple', 'n. 廟宇'),
+      C('w', 'statue', 'n. 雕像')];
+    bad = null;
+    for (let s = 0; s < 50 && !bad; s++) {
+      const q = VC.pickChoices(devotion, pool, RNG(s));
+      if (q.options.indexOf('n. 奉獻、投入') !== -1) bad = s + ': ' + JSON.stringify(q);
+    }
+    ok(!bad, 'a meaning that shares a sense with the answer is left out while others are there', bad);
+    const q = VC.pickChoices(devotion, pool.slice(0, 3), RNG(1));
+    eq(q.options.slice().sort(), ['n. 女神', 'n. 奉獻、投入', 'n. 虔誠、奉獻'].sort(), '… and used when nothing else is left');
+    eq(VC.quizEligible([devotion, pool[1]]), { choice: 2, spell: 0 }, 'quizEligible still counts it');
+  });
+
+  test('pickChoices: options without notes that give the answer away (RL-1)', () => {
+    const lantern = C('l', 'lantern', 'n. 燈籠 → Lantern Festival 元宵節');
+    const pool = [lantern, C('g', 'generosity', 'n. 慷慨 ← generous (adj.)'), C('d', 'devotion', 'n. 虔誠、奉獻 → be devoted to + N / V-ing'),
+      C('s', 'sedan chair', 'n. 轎子'), C('k', 'kneel', 'v. 跪下（kneel down）')];
+    let bad = null;
+    for (let s = 0; s < 30 && !bad; s++) {
+      const q = VC.pickChoices(lantern, pool, RNG(s));
+      if (q.options[q.answerIndex] !== 'n. 燈籠' || q.options.some(o => /[A-Za-z]{2}/.test(o.replace(/^(?:n|v|adj)\. /, '')))) bad = s + ': ' + JSON.stringify(q);
+    }
+    ok(!bad, 'the answer and the wrong options are shown without English notes', bad);
+    eq(VC.pickChoices(lantern, [lantern, C('m', 'lamp', 'n. 燈籠（舊式）')], RNG(1)).options.length, 2,
+       'distinct by the meaning as shown');
+    eq(VC.pickChoices(lantern, [lantern, C('m', 'lantern2', 'n. 燈籠 → paper lantern')], RNG(1)).options.length, 1,
+       'two meanings that only differ in their notes are one option');
+    const qs = VC.buildQuiz([C('k', 'kneel', 'v. 跪下（kneel down）', { example: 'Please kneel here.' })], 'spell', 0, RNG(1));
+    eq(qs[0].hint, 'v. 跪下', 'spelling hint without the note (no translation)');
   });
 
   test('pickChoices: small pools and exclusions', () => {
@@ -1011,8 +1223,8 @@
     let bad = null;
     qs.forEach(q => {
       const keys = q.options.map(VC.meaningKey);
-      if (q.options.length !== 4 || VC.meaningKey(q.options[q.answerIndex]) !== 'v. 放棄' ||
-          keys.filter(k => k === 'v. 放棄').length !== 1 || q.options.some(o => VC.posOf(o) !== 'v.')) bad = JSON.stringify(q);
+      if (q.options.length !== 4 || VC.meaningKey(q.options[q.answerIndex]) !== '放棄' ||
+          keys.filter(k => k === '放棄').length !== 1 || q.options.some(o => VC.posOf(o) !== 'v.')) bad = JSON.stringify(q);
     });
     ok(!bad, '4 options, v. first, the meaning once (abandon in deckCards is the same word)', bad);
     ok(qs.every(q => q.options.indexOf('phr. 放棄') === -1), 'no other part of speech needed', JSON.stringify(qs));

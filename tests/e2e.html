@@ -25,8 +25,10 @@
  * the window.VCApp API; app time is fixed with VCApp.setClock and quiz / shuffle randomness
  * with VCApp.setRandom(VC.seededRng(n)).
  * Writes "RESULT: PASS n FAIL m" (+ failure details) into <pre id="out"> and the title.
- * Run headless via tests/run_tests.py, or open http://…/tests/e2e.html in a browser to watch.
- * Add ?only=<text> to run only the tests whose name contains <text>.
+ * Run headless via tests/run_tests.py, or open http://localhost:8000/tests/e2e.html in a browser
+ * to watch. Only on localhost / 127.0.0.1 / [::1]: the tests share this origin's localStorage with
+ * the app, so on the app's own web address they refuse to run. Every e2e-<run> key is removed at
+ * the end. Add ?only=<text> to run only the tests whose name contains <text>.
  */
 (function () {
   'use strict';
@@ -144,6 +146,12 @@
     if (!el) throw new Error('missing element: ' + (label || target));
     if (el.disabled) throw new Error('element is disabled: ' + (label || target));
     el.click();
+  }
+
+  /** A finger tap: a click with detail 1 (el.click() and keyboard activation have detail 0). */
+  function tap(el, label) {
+    if (!el) throw new Error('missing element: ' + (label || 'tap target'));
+    el.dispatchEvent(new (W().MouseEvent)('click', { bubbles: true, cancelable: true, detail: 1 }));
   }
 
   function setValue(el, value, label) {
@@ -357,7 +365,8 @@
   const quizCard = () => S().cards.find((c) => c.id === quizCardId());
   const optTexts = () => $$('.opt .opt-text').map((el) => el.textContent);
   const flat = (m) => String(m).replace(/\s*\n\s*/g, '；');
-  const correctIndex = () => optTexts().indexOf(flat(quizCard().meaning));
+  const shown = (m) => flat(VC().quizMeaning(m)); // a meaning as the quiz shows it (notes left out)
+  const correctIndex = () => optTexts().indexOf(shown(quizCard().meaning));
   const wrongIndex = () => (correctIndex() + 1) % $$('.opt').length;
 
   function noAppErrors() {
@@ -936,9 +945,9 @@
     const fl = S().decks[0].flash;
     eq([fl.shuffle, fl.index], [true, 0], 'shuffled, from the first card');
     ok(fl.seed > 0, 'a seed is stored', JSON.stringify(fl));
-    const order = VC().shuffle(cardsOf(S(), deckId), VC().seededRng(fl.seed)).map((c) => c.word);
+    const order = VC().seededOrder(cardsOf(S(), deckId), fl.seed).map((c) => c.word);
     ok(order.join() !== seqWords.join(), 'a different order');
-    eq([flashWord(), flashProgress()], [order[0], '1 / 12'], 'the first card of VC.shuffle(cards, VC.seededRng(seed))');
+    eq([flashWord(), flashProgress()], [order[0], '1 / 12'], 'the first card of VC.seededOrder(cards, seed)');
     click('next');
     click('next');
     click('next');
@@ -946,7 +955,7 @@
     await sleep(400);
 
     await openApp({ sk: sk, keep: true, clock: T0 });
-    eq(S().decks[0].flash, { index: 3, shuffle: true, seed: fl.seed }, 'saved');
+    eq(S().decks[0].flash, { index: 3, shuffle: true, seed: fl.seed, cardId: cardWord(S(), order[3]).id }, 'saved (with the card on screen)');
     await openDeck(deckId);
     eq(text($('[data-action="hub-cards"] .tile-meta')), '看到第 4 張', 'the hub shows where you are');
     click('hub-cards');
@@ -1062,8 +1071,8 @@
       const opts = optTexts();
       eq(opts.length, 4, label + ': four options');
       eq(new Set(opts).size, 4, label + ': all different');
-      eq(opts.filter((o) => o === c.meaning).length, 1, label + ': exactly one is the meaning');
-      ok(opts.every((o) => S().cards.some((x) => x.meaning === o)), label + ': every option is a meaning from the deck');
+      eq(opts.filter((o) => o === shown(c.meaning)).length, 1, label + ': exactly one is the meaning');
+      ok(opts.every((o) => S().cards.some((x) => shown(x.meaning) === o)), label + ': every option is a meaning from the deck');
       ok($$('.opt').every((b) => b.offsetHeight >= 56), label + ': options at least 56px tall');
     };
     checkQuestion('q1');
@@ -1964,7 +1973,7 @@
     click('open-settings');
     await onScreen('settings');
     ok(act('theme-auto') && $('#pref-rate') && act('export-backup') && act('restore-backup') && act('clear-all'), 'settings controls');
-    ok(/版本\s*2\.0/.test(text($('main'))), 'version 2.0 shown');
+    ok(/版本\s*2\.1/.test(text($('main'))), 'version 2.1 shown');
     if (act('voice-test')) ok(/字卡和選擇題出現英文時自動唸出來/.test(text($('main'))), '自動朗讀 hint');
     ok(/加入主畫面/.test(text($('main'))) && /安裝應用程式/.test(text($('main'))), 'add-to-home-screen tips');
     ok(!/複習|學習進度|每日/.test(text($('main'))), 'no spaced-repetition wording');
@@ -2514,12 +2523,20 @@
 
   test('version mismatch: cached files are dropped only when the server answers (DS-1)', async function () {
     const FLAG = 'vocabcards.reloadedFor';
+    // The srcdoc app has no ?sk: it gets its own key, and the real one ('vocabcards.v1', where a
+    // student on this origin keeps the words) must stay exactly as it was (PH-1).
+    const SK = 'e2e-' + RUN_ID + '-ds1';
+    const REAL = 'vocabcards.v1';
+    const realSaved = localStorage.getItem(REAL);
+    const sentinel = JSON.stringify({ version: 2, decks: [{ id: 'real', name: '學生的單字' }], cards: [], seq: 0, prefs: {} });
+    localStorage.setItem(REAL, sentinel);
     const boot = async (online) => {
       sessionStorage.removeItem(FLAG);
       window.__dv = { deleted: [], heads: [], boots: 0 };
       if (frame) frame.remove();
       frame = document.createElement('iframe');
       frame.srcdoc = '<!doctype html><meta charset="utf-8"><div id="app"></div><div id="toasts"></div>' +
+        '<script>window.VC_STORAGE_KEY = "' + SK + '";<\/script>' +
         '<script src="../core.js"><\/script><script>VC.version = "0.9"; parent.__dv.boots++;' +
         'caches.keys = function () { return Promise.resolve(["vocabcards-v9", "other-cache"]); };' +
         'caches.delete = function (k) { parent.__dv.deleted.push(k); return Promise.resolve(true); };' +
@@ -2540,9 +2557,14 @@
       eq(window.__dv.deleted, ['vocabcards-v9'], 'server answers: the app caches are deleted, then the page reloads');
       await sleep(800);
       eq(window.__dv.boots, 2, 'reloads only once');
+      W().VCApp.importText('apple | n. 蘋果', { deckName: '測試' });
+      ok(JSON.parse(localStorage.getItem(SK)).cards.length === 1, 'the srcdoc app saves under window.VC_STORAGE_KEY');
+      if (frame) { frame.remove(); frame = null; }
+      eq(localStorage.getItem(REAL), sentinel, 'the real vocabcards.v1 data is untouched (PH-1)');
     } finally {
       sessionStorage.removeItem(FLAG);
-      localStorage.removeItem('vocabcards.v1');
+      localStorage.removeItem(SK);
+      if (realSaved === null) localStorage.removeItem(REAL); else localStorage.setItem(REAL, realSaved);
       if (frame) { frame.remove(); frame = null; }
     }
   });
@@ -2735,15 +2757,418 @@
     noAppErrors();
   });
 
+  /* ------------------------------------------------- fixes after the v2.0 review */
+
+  // Lines like the student's L9 file: notes with English inside the meaning, no examples.
+  const L9 = [
+    'lantern | n. 燈籠 → Lantern Festival 元宵節',
+    'generosity | n. 慷慨 ← generous (adj.)',
+    'devotion | n. 虔誠、奉獻 → be devoted to + N / V-ing',
+    'sedan chair | n. 轎子',
+    'kneel | v. 跪下（kneel down）',
+    'participate | v. 參加（+ in）→ participant (n.) 參加者',
+  ].join('\n');
+  const latinOutsidePos = (o) => /[A-Za-z]{2,}/.test(o.replace(/^(?:n|v|adj)\.\s*/, ''));
+
+  test('選擇題 and 中文 front: notes with English are not shown (RL-1, F3, PH-2)', async function () {
+    await openApp({ clock: T0 });
+    W().VCApp.importText(L9, { deckName: 'L9 樣本' });
+    const deckId = deckNamed(S(), 'L9 樣本').id;
+    seedRandom(169);
+    await openDeck(deckId);
+    click('hub-choice');
+    await onScreen('quiz');
+    eq(quizCount(), '1 / 6', 'every word');
+    let firstWrong = null;
+    for (let i = 0; i < 6; i++) {
+      const c = quizCard();
+      const opts = optTexts();
+      ok(!opts.some(latinOutsidePos), 'q' + (i + 1) + ' (' + c.word + '): no English in the options', JSON.stringify(opts));
+      ok(correctIndex() >= 0, 'q' + (i + 1) + ': the meaning as shown is an option');
+      if (i === 0) {
+        firstWrong = c;
+        click('option-' + wrongIndex());
+        eq(text($('#quiz-feedback')), '答錯了，正確答案是 ' + shown(c.meaning), 'feedback: the meaning as shown');
+      } else {
+        click('option-' + correctIndex());
+      }
+      click('quiz-next');
+      await sleep(10);
+    }
+    eq(text($('#quiz-score')), '5 / 6', 'score');
+    eq(text($('.wl-row .wr-meaning')), flat(firstWrong.meaning), 'the results list shows the whole meaning, notes and all');
+    click('quiz-home');
+    await onScreen('deck');
+
+    const s = S();
+    s.decks[0].settings.direction = 'zh2en';
+    W().VCApp.setState(s);
+    click('hub-cards');
+    await onScreen('cards');
+    eq(text($('.front-meaning')), 'n. 燈籠', '中文 front: lantern without "→ Lantern Festival"');
+    click('flip');
+    eq([text($('.card-back .word')), text($('.card-back .meaning'))], ['lantern', 'n. 燈籠 → Lantern Festival 元宵節'],
+       'the back: the word and the whole meaning');
+    noAppErrors();
+  });
+
+  test('選擇題: a tap right after a new question appears does not answer it (F1)', async function () {
+    await openApp({ clock: T0 });
+    const deckId = await importWords(25, '連點');
+    seedRandom(5);
+    await openDeck(deckId);
+    click('hub-choice');
+    await onScreen('quiz');
+    await sleep(400);
+    click('option-' + correctIndex());
+    await sleep(950);
+    eq([quizCount(), !!$('.opts.answered')], ['2 / 10', false], 'a right answer moved on by itself');
+    const totals = () => [totalOf(S(), 'right'), totalOf(S(), 'wrong')];
+    const before = totals();
+    tap(act('option-' + wrongIndex()), 'option');
+    ok(!$('.opts.answered'), 'the tap that lands just after the new question appeared does not answer it');
+    eq(totals(), before, 'nothing counted');
+    await sleep(400);
+    tap(act('option-' + correctIndex()), 'option');
+    ok($('.opts.answered'), 'a tap a moment later answers');
+    eq(totals(), [before[0] + 1, before[1]], 'and counts');
+    key('Enter');
+    for (let i = 3; i <= 10; i++) {
+      key(String(wrongIndex() + 1));
+      key('Enter');
+    }
+    await waitFor(() => $('#quiz-results'), 'results');
+    tap(act('retry-wrong'), 'retry-wrong');
+    tap(act('option-0'), 'option-0'); // the second tap of a double tap on 重測答錯的 N 題
+    eq([quizCount(), !!$('.opts.answered')], ['1 / 8', false], '重測: the double tap does not answer question 1');
+    key('1');
+    ok($('.opts.answered'), 'keys 1–4 answer at once');
+    for (let i = 1; i <= 8; i++) {
+      if (i > 1) key('1');
+      key('Enter');
+    }
+    await waitFor(() => $('#quiz-results'), 'results again');
+    tap(act('quiz-again'), 'quiz-again');
+    tap(act('option-1'), 'option-1');
+    eq([quizCount(), !!$('.opts.answered')], ['1 / 10', false], '再測一次: the double tap does not answer question 1');
+    noAppErrors();
+  });
+
+  test('拼字題: a double tap on 確認 or a quick second Enter does not skip the correction (F2, PH-3)', async function () {
+    await openApp({ clock: T0 });
+    const deckId = await importWords(12, '雙擊');
+    seedRandom(5);
+    await openDeck(deckId);
+    click('hub-spell');
+    await onScreen('quiz');
+    const input = $('#spell-input');
+    setValue(input, 'wrongword');
+    tap(act('spell-submit'), 'spell-submit');
+    ok($('.quiz-feedback.bad'), 'wrong');
+    tap(act('quiz-next'), 'quiz-next');
+    eq([quizCount(), !!$('.quiz-feedback.bad')], ['1 / 10', true], 'the second tap (now on 下一題) does not move on');
+    keyOn(input, 'Enter');
+    eq([quizCount(), !!$('.quiz-feedback.bad')], ['1 / 10', true], 'nor does a quick second Enter');
+    await sleep(550);
+    tap(act('quiz-next'), 'quiz-next');
+    eq(quizCount(), '2 / 10', 'a moment later 下一題 works');
+    setValue(input, 'nope');
+    keyOn(input, 'Enter');
+    click('quiz-next'); // detail 0: a keyboard / screen-reader activation
+    eq(quizCount(), '3 / 10', 'keyboard activation is never held back');
+    setValue(input, VC().makeCloze(quizCard()).answer);
+    tap(act('spell-submit'), 'spell-submit');
+    tap(act('quiz-next'), 'quiz-next');
+    eq(quizCount(), '4 / 10', 'after a right answer 下一題 works at once');
+    noAppErrors();
+  });
+
+  test('拼字題: 不會 and the meaning in the card, other forms, repeated words, be-phrases (PH-7, F7, F6, RL-4)', async function () {
+    await openApp({ clock: T0 });
+    W().VCApp.importText([
+      'perceive | v. 察覺 | She perceived a change in his mood. | 她察覺到他情緒的變化。',
+      'practice | n. 練習 | Practice makes perfect, so practice every day. | 熟能生巧，所以每天都要練習。',
+      'be accustomed to | phr. 習慣於 | Most students are accustomed to studying late at night. | 大多數學生習慣熬夜讀書。',
+      'kneel | v. 跪下（kneel down） | Please kneel here.',
+    ].join('\n'), { deckName: '形態' });
+    seedRandom(4);
+    await openDeck(deckNamed(S(), '形態').id);
+    click('hub-spell');
+    await onScreen('quiz');
+    const input = $('#spell-input');
+    const giveup = act('spell-giveup');
+    ok(giveup.closest('.quiz-card .quiz-card-foot'), '不會，看答案 is in the sentence card');
+    ok(giveup.getBoundingClientRect().bottom <= input.getBoundingClientRect().top, '… above the input (the phone keyboard covers what is below it)');
+    const seen = [];
+    for (let i = 0; i < 4; i++) {
+      const c = quizCard();
+      seen.push(c.word);
+      if (c.word === 'perceive') {
+        setValue(input, 'perceive');
+        click('spell-submit');
+        ok($('.quiz-feedback.bad'), 'perceive for perceived: still wrong');
+        eq(text($('.fb-form')), '單字拼對了，但句子裡要用 perceived', 'but it says only the form was off');
+        eq([text($('.quiz-card .fb-meaning b')), text($('.quiz-card .fb-meaning span'))], ['perceive', 'v. 察覺'],
+           'the word and its meaning in the card');
+        eq(cardWord(S(), 'perceive').wrong, 1, 'counted as wrong');
+      } else if (c.word === 'practice') {
+        eq(text($('.cloze')), 'P______e makes perfect, so p______e every day.', 'the second practice is masked too');
+        click('spell-giveup');
+        ok(!$('.fb-form'), '不會: no form line');
+        eq(text($('.cloze')), 'Practice makes perfect, so practice every day.', 'answered: the whole sentence');
+      } else if (c.word === 'be accustomed to') {
+        eq(text($('.cloze')), 'Most students are a________d t_ studying late at night.', 'be is not asked');
+        setValue(input, 'be accustomed to');
+        click('spell-submit');
+        ok($('.quiz-feedback.ok'), 'typing the phrase as learned (with be) is right');
+      } else {
+        eq(text($('.quiz-hint')), 'v. 跪下', 'hint without the English note');
+        setValue(input, 'kneel');
+        click('spell-submit');
+        ok($('.quiz-feedback.ok'), 'kneel');
+      }
+      await sleep(600);
+      click('quiz-next');
+      await sleep(10);
+    }
+    eq(seen.slice().sort(), ['be accustomed to', 'kneel', 'perceive', 'practice'], 'every word');
+    eq(text($('#quiz-score')), '2 / 4', 'score');
+    noAppErrors();
+  });
+
+  test('拼字題 without examples: 請 Claude 補例句 → paste the reply → 更新內容 (RL-2)', async function () {
+    await openApp({ clock: T0 });
+    W().VCApp.importText('#deck: 沒有例句\nmania | n. 狂熱\ngoddess | n. 女神\ntemple | n. 廟宇\nstatue | n. 雕像\n' +
+      'lantern | n. 燈籠 → Lantern Festival 元宵節', {});
+    const deckId = deckNamed(S(), '沒有例句').id;
+    const s = S();
+    s.cards.find((c) => c.word === 'temple').right = 2;
+    W().VCApp.setState(s);
+    await openDeck(deckId);
+    ok(act('hub-spell').disabled, '拼字題 disabled');
+    eq(text(act('add-examples')), '請 Claude 幫這個牌組補例句', 'a way to get example sentences');
+
+    click('hub-cards');
+    await onScreen('cards');
+    for (let i = 0; i < 5; i++) click('next');
+    ok($('#flash-end'), 'end of the flashcards');
+    eq(text($('#flash-end .done-note')), '拼字題：單字都沒有例句，無法出題', 'it says why there is no 拼字題');
+    ok($('#flash-end [data-action="add-examples"]'), '… and how to get examples');
+    click('flash-home');
+    await onScreen('deck');
+
+    let copied = null;
+    Object.defineProperty(W().navigator, 'clipboard', { configurable: true,
+      value: { writeText: (t) => { copied = t; return Promise.resolve(); } } });
+    await openSheetBy('add-examples');
+    ok(/5 個單字還沒有例句/.test(text(sheetOpen())), 'the sheet says how many words lack examples', text(sheetOpen()));
+    click('copy-examples-prompt');
+    await waitFor(() => copied !== null, 'clipboard write');
+    ok(copied.indexOf('#deck: 沒有例句') >= 0 && ['mania', 'goddess', 'temple', 'statue', 'lantern'].every((w) => copied.indexOf('\n' + w + ' | ') >= 0),
+       'the deck as a text file', copied);
+    ok(copied.indexOf('一定要包含這個單字本身') >= 0 && copied.indexOf('第 6 欄備註') >= 0, 'with the example rule and where notes go');
+    click('paste-examples');
+    await onScreen('import');
+    const reply = '好的！以下是補好例句的單字檔：\n```text\n#deck: 沒有例句\n' +
+      'mania | n. 狂熱 | Baseball mania swept the town. | 棒球熱席捲了小鎮。\n' +
+      'goddess | n. 女神 | People pray to the goddess. | 人們向女神祈禱。\n' +
+      'temple | n. 廟宇 | The temple is very old. | 這座廟很古老。\n' +
+      'statue | n. 雕像 | A statue stands in the square. | 廣場上有一座雕像。\n' +
+      'lantern | n. 燈籠 | We hung a red lantern. | 我們掛了一個紅燈籠。 | Lantern Festival 元宵節\n```\n需要再幫忙嗎？';
+    setValue($('#import-text'), reply, 'Claude’s reply');
+    eq(act('dup-update').getAttribute('aria-pressed'), 'true', '更新內容（保留測驗紀錄） is already chosen');
+    eq(text($('#import-summary')), '可匯入 5 張', 'all five words are updated');
+    click('import-confirm');
+    await onScreen('deck');
+    ok(!act('hub-spell').disabled && !act('add-examples'), '拼字題 works now; no more 補例句 link');
+    const after = S();
+    eq(cardsOf(after, deckId).filter((c) => c.example).length, 5, 'every word has an example');
+    eq(cardWord(after, 'temple').right, 2, 'quiz records kept');
+    eq([cardWord(after, 'lantern').meaning, cardWord(after, 'lantern').note], ['n. 燈籠', 'Lantern Festival 元宵節'], 'the note moved to 備註');
+    W().VCApp.importText(wordsText(4), { deckName: '有例句' });
+    await hubVia(deckNamed(S(), '有例句').id);
+    ok(!act('add-examples'), 'a deck with examples: no link');
+    noAppErrors();
+  });
+
+  test('browse and editor: 不考拼字, and what the spelling quiz asks while typing (RL-7)', async function () {
+    await openApp({ clock: T0 });
+    W().VCApp.importText('take | v. 拿 | He took the last one. | 他拿走最後一個。\napple | n. 蘋果 | I ate an apple. | 我吃了一顆蘋果。\nbanana | n. 香蕉',
+      { deckName: '提示' });
+    const deckId = deckNamed(S(), '提示').id;
+    W().location.hash = '#/deck/' + encodeURIComponent(deckId) + '/words';
+    await onScreen('browse');
+    const pills = {};
+    $$('.word-row').forEach((r) => { pills[text(r.querySelector('.wr-word'))] = text(r.querySelector('.p-nospell')); });
+    eq(pills, { take: '不考拼字', apple: null, banana: null }, 'only an example without its word is marked');
+    click($('[data-action="card-row"][data-card-id="' + cardWord(S(), 'apple').id + '"]'));
+    await waitFor(() => sheetOpen() && $('#f-example-hint'), 'editor');
+    eq(text($('#f-example-hint')), '拼字題：I ate an a___e.', 'the question it makes');
+    setValue($('#f-example'), 'I ate a pear.', 'example');
+    ok($('#f-example-hint').classList.contains('warn') && /找不到「apple」/.test(text($('#f-example-hint'))), 'warns while typing',
+       text($('#f-example-hint')));
+    setValue($('#f-word'), 'pear', 'word');
+    eq(text($('#f-example-hint')), '拼字題：I ate a p__r.', 'follows the word too');
+    setValue($('#f-example'), '', 'example');
+    eq(text($('#f-example-hint')), '例句裡要有這個單字，拼字題才能從例句出題。', 'no example: the usual hint');
+    click('sheet-close');
+    await overlaysGone();
+    noAppErrors();
+  });
+
+  test('自動朗讀 and 🔊: the headword without its notation (RL-8)', async function () {
+    await openApp({ clock: T0 });
+    W().VCApp.importText('send sb off | phr. 為某人送行\nbe devoted to + N / V-ing | phr. 致力於\nabandon | v. 放棄', { deckName: '朗讀' });
+    const spoken = stubSpeech();
+    if (!spoken) { ok(true, 'no speech synthesis in this browser'); return; }
+    const s = S();
+    s.prefs.autoSpeak = true;
+    W().VCApp.setState(s);
+    await openDeck(deckNamed(S(), '朗讀').id);
+    click('hub-cards');
+    await onScreen('cards');
+    click('next');
+    click('next');
+    eq(spoken, ['send somebody off', 'be devoted to', 'abandon'], 'read without sb / + N / V-ing');
+    click('prev');
+    click($('#flash-card [data-action="speak"]'), '🔊');
+    eq(spoken.slice(3), ['be devoted to', 'be devoted to'], '🔊 the same');
+    noAppErrors();
+  });
+
+  test('flashcards: 隨機 looks on, a mistaken tap is undone, the place survives added / deleted cards (PH-5, F4)', async function () {
+    await openApp({ clock: T0 });
+    const deckId = await importWords(25, '位置');
+    seedRandom(7);
+    await openDeck(deckId);
+    click('hub-cards');
+    await onScreen('cards');
+    for (let i = 0; i < 5; i++) click('next');
+    const w6 = flashWord();
+    eq(flashProgress(), '6 / 25', 'card 6');
+    const offBg = W().getComputedStyle(act('shuffle')).backgroundColor;
+    click('shuffle');
+    const onBg = W().getComputedStyle(act('shuffle')).backgroundColor;
+    ok(offBg !== onBg, '隨機 looks different while it is on', offBg + ' / ' + onBg);
+    click('shuffle');
+    eq([flashWord(), flashProgress()], [w6, '6 / 25'], 'turned off again right away: back where it was');
+    click('shuffle');
+    for (let i = 0; i < 9; i++) click('next');
+    const seed = S().decks[0].flash.seed;
+    const order = VC().seededOrder(cardsOf(S(), deckId), seed);
+    const here = flashWord();
+    eq([here, flashProgress()], [order[9].word, '10 / 25'], 'the 10th card of the shuffled order');
+    const s = S();
+    s.cards = s.cards.filter((c) => c.id !== order[2].id);
+    W().VCApp.setState(s);
+    eq([flashWord(), flashProgress()], [here, '9 / 24'], 'a card before it deleted: the same card stays');
+    W().VCApp.importText('zebra | n. 斑馬 | The zebra runs. | 斑馬在跑。', { deckId: deckId });
+    eq(flashWord(), here, 'a card added: the same card stays');
+    const now = VC().seededOrder(cardsOf(S(), deckId), seed).map((c) => c.word);
+    const next = now[now.indexOf(here) + 1];
+    await openSheetBy('edit-card');
+    click('card-delete');
+    await modalAnswer(true);
+    await overlaysGone();
+    eq(flashWord(), next, '✎ → 刪除 on the card on screen: the next card of the same order');
+    noAppErrors();
+  });
+
+  test('quiz: the back gesture keeps an unfinished quiz, its tile continues it (PH-8)', async function () {
+    await openApp({ clock: T0 });
+    const deckId = await importWords(8, '繼續');
+    seedRandom(2);
+    await openDeck(deckId);
+    click('hub-choice');
+    await onScreen('quiz');
+    click('option-' + correctIndex());
+    click('quiz-next');
+    await sleep(10);
+    click('option-' + wrongIndex());
+    click('quiz-next');
+    await sleep(10);
+    eq(quizCount(), '3 / 8', 'question 3');
+    W().history.back();
+    await onScreen('deck');
+    eq(text($('[data-action="hub-choice"] .tile-meta')), '繼續第 3 題', 'the tile says the quiz can go on');
+    click('hub-choice');
+    await onScreen('quiz');
+    eq(quizCount(), '3 / 8', 'it goes on at question 3');
+    eq([totalOf(S(), 'right'), totalOf(S(), 'wrong')], [1, 1], 'nothing counted twice');
+    click('quiz-quit');
+    eq(await modalAnswer(true), '要結束測驗嗎？', '✕ → 結束');
+    await onScreen('deck');
+    ok(!$('[data-action="hub-choice"] .tile-meta'), 'ended: nothing to continue');
+    click('hub-choice');
+    await onScreen('quiz');
+    eq(quizCount(), '1 / 8', 'a fresh quiz');
+    noAppErrors();
+  });
+
+  test('two tabs: a rename there and a flashcard step here are both kept (F9)', async function () {
+    const sk = await openApp({ clock: T0 });
+    const deckId = await importWords(5, '舊名字');
+    await openDeck(deckId);
+    click('hub-cards');
+    await onScreen('cards');
+    await sleep(400);
+    click('next'); // its save is still pending
+    const other = JSON.parse(localStorage.getItem(sk));
+    other.decks[0].name = '新名字';
+    other.decks[0].settings.direction = 'zh2en';
+    storageEvent(sk, JSON.stringify(other));
+    await sleep(500);
+    const saved = JSON.parse(localStorage.getItem(sk));
+    eq([saved.decks[0].name, saved.decks[0].settings.direction, saved.decks[0].flash.index], ['新名字', 'zh2en', 1],
+       'the other tab’s name and 字卡正面, and this tab’s place');
+    noAppErrors();
+  });
+
+  test('focus stays where it was used; 翻面 pressed; answers labelled; 44px count buttons (PH-6, PH-9)', async function () {
+    await openApp({ clock: T0 });
+    const deckId = await importWords(25, '焦點');
+    seedRandom(3);
+    await openDeck(deckId);
+    ok($$('.quiz-seg button').every((b) => b.offsetHeight >= 44), '每次測驗題數 buttons are at least 44px tall',
+       JSON.stringify($$('.quiz-seg button').map((b) => b.offsetHeight)));
+    click('hub-cards');
+    await onScreen('cards');
+    act('next').focus();
+    click('next');
+    eq(D().activeElement.getAttribute('data-action'), 'next', '下一張 keeps the focus');
+    act('flip').focus();
+    click('flip');
+    eq([D().activeElement.getAttribute('data-action'), act('flip').getAttribute('aria-pressed')], ['flip', 'true'], '翻面 keeps the focus, pressed');
+    click('back');
+    await onScreen('deck');
+    click('hub-choice');
+    await onScreen('quiz');
+    await sleep(400);
+    const ci = correctIndex();
+    const wi = wrongIndex();
+    act('option-' + wi).focus();
+    click('option-' + wi);
+    eq(D().activeElement.getAttribute('data-action'), 'quiz-next', 'after answering, the focus is on 下一題');
+    ok(/^正確答案：/.test(act('option-' + ci).getAttribute('aria-label')) && /答錯/.test(act('option-' + wi).getAttribute('aria-label')),
+       'the options say which is right and which was picked');
+    click('quiz-next');
+    ok(D().activeElement.classList.contains('word'), 'the next question: the focus is on its word');
+    noAppErrors();
+  });
+
   test('release: versions match; the service worker caches every app file', async function () {
     await openApp({ clock: T0 });
-    eq(VC().version, '2.0', 'core.js VC.version');
+    eq(VC().version, '2.1', 'core.js VC.version');
     click('open-settings');
     await onScreen('settings');
     ok(new RegExp('版本\\s*' + VC().version.replace('.', '\\.')).test(text($('main'))), 'settings shows APP_VERSION = VC.version');
     const get = async (f) => (await fetch('../' + f, { cache: 'no-store' })).text();
     const sw = await get('sw.js');
-    ok(/const CACHE = 'vocabcards-v4';/.test(sw), 'service worker cache vocabcards-v4');
+    ok(/const CACHE = 'vocabcards-v5';/.test(sw), 'service worker cache vocabcards-v5');
+    // A release changes sw.js, so the browser installs a new worker that downloads every file (PH-4).
+    eq((/const VERSION = '([^']*)';/.exec(sw) || [])[1], VC().version, 'sw.js VERSION = VC.version');
+    const cfg = await get('_config.yml');
+    ok(/exclude:[\s\S]*- tests\b/.test(cfg) && /- tools\b/.test(cfg), 'GitHub Pages does not publish tests/ and tools/ (PH-1)', cfg);
     const html = await get('index.html');
     const refs = Array.from(html.matchAll(/(?:src|href)="([^"#:]+)"/g)).map((m) => m[1]);
     ok(refs.length >= 6, 'index.html refs', JSON.stringify(refs));
@@ -2774,7 +3199,21 @@
     document.title = lines[0];
   }
 
+  /** This run's storage keys (apps, filler, unreadable copies): none is left behind. */
+  function removeRunKeys() {
+    Object.keys(localStorage).forEach((k) => {
+      if (k.indexOf('e2e-' + RUN_ID) === 0 || k.indexOf('e2e-fill-' + RUN_ID) === 0) localStorage.removeItem(k);
+    });
+  }
+
   async function run() {
+    // The app on the same origin keeps the user's words in this localStorage: never test there.
+    if (!/^(localhost|127\.0\.0\.1|\[::1\])$/.test(location.hostname)) {
+      out.textContent = 'NOT RUN: the tests only run on localhost / 127.0.0.1 (they would share the app\'s storage here).\n' +
+        '測試只能在自己的電腦（localhost）上執行，不然會用到 App 存單字的地方。';
+      document.title = 'NOT RUN';
+      return;
+    }
     const only = new URLSearchParams(location.search).get('only');
     const selected = only ? tests.filter((t) => t.name.indexOf(only) >= 0) : tests;
     for (const t of selected) {
@@ -2789,7 +3228,10 @@
       summary.push((fail > before ? 'not ok ' : 'ok     ') + t.name + '  (' + (pass + fail - checks) + ' checks)');
       out.textContent = 'RUNNING ' + summary.length + '/' + selected.length;
     }
-    if (frame) { frame.remove(); frame = null; }
+    if (frame) { frame.remove(); frame = null; } // its pagehide save lands first …
+    removeRunKeys();                               // … then every key of this run goes
+    current = 'cleanup';
+    eq(Object.keys(localStorage).filter((k) => k.indexOf(RUN_ID) >= 0), [], 'no e2e storage keys left behind (PH-1)');
     report();
   }
 

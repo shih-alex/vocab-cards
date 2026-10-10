@@ -290,6 +290,8 @@ svg { display: block; flex: none; }
 
 .icon-btn svg { width: 22px; height: 22px; }
 .icon-btn:active { background: var(--surface-2); }
+/* A toggle that is on (隨機順序): visibly different from off. */
+.icon-btn[aria-pressed="true"] { background: var(--accent-soft); color: var(--accent); }
 .icon-btn:disabled { opacity: 0.3; cursor: default; background: transparent; }
 .icon-btn.muted { color: var(--muted); }
 
@@ -516,10 +518,17 @@ svg { display: block; flex: none; }
 .tile:disabled .tile-icon { background: var(--line); color: var(--muted); }
 .tile:disabled .tile-title { color: var(--muted); }
 
+/* 「請 Claude 幫這個牌組補例句」 under the tiles */
+.hub-examples { display: flex; justify-content: center; margin-top: 6px; }
+.examples-link { color: var(--accent); font-weight: 600; }
+.examples-help p { margin: 0 0 10px; font-size: 15px; line-height: 1.65; }
+.examples-help ol { margin: 0; padding-left: 1.4em; color: var(--muted); font-size: 14px; line-height: 1.7; }
+.examples-help li + li { margin-top: 4px; }
+
 .hub-more { margin-top: 18px; }
 .hub-more .set-row { min-height: 58px; }
 .seg.quiz-seg { flex: none; }
-.seg.quiz-seg button { flex: 1 1 0; min-width: 50px; min-height: 36px; padding: 0 10px; font-variant-numeric: tabular-nums; }
+.seg.quiz-seg button { flex: 1 1 0; min-width: 50px; min-height: 44px; padding: 0 10px; font-variant-numeric: tabular-nums; }
 .quiz-count-fixed { flex: none; color: var(--muted); font-size: 15px; font-weight: 600; font-variant-numeric: tabular-nums; }
 .hub-empty { padding-top: 5vh; }
 
@@ -786,6 +795,9 @@ svg { display: block; flex: none; }
   margin-top: 26px;
 }
 
+.done-actions .done-note { margin: 0; color: var(--muted); font-size: 13px; line-height: 1.5; }
+.done-actions .examples-link { align-self: center; margin-top: -8px; }
+
 /* ---------- Quiz ---------- */
 .topbar-count {
   flex: none;
@@ -948,7 +960,20 @@ svg { display: block; flex: none; }
 .input.spell-input.ok { border-color: var(--green); box-shadow: 0 0 0 3px var(--green-soft); color: var(--green); }
 .input.spell-input.bad { border-color: var(--red); box-shadow: 0 0 0 3px var(--red-soft); color: var(--red); }
 .spell-row .btn { flex: none; min-height: 56px; padding: 0 20px; border-radius: 16px; }
-.spell-giveup { display: flex; width: fit-content; margin: 6px auto 0; }
+
+/* The hint and 不會，看答案 share the card's last line: above the input, so the phone keyboard never covers them. */
+.quiz-card-foot {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin-top: 14px;
+  padding-top: 10px;
+  border-top: 1px solid var(--line);
+}
+
+.quiz-card-foot .quiz-hint { flex: 1; min-width: 0; margin: 0; padding: 2px 0 0; border: 0; }
+.quiz-card-foot .spell-giveup { flex: none; min-height: 36px; margin: -4px -6px -8px auto; padding: 0 6px; color: var(--accent); font-weight: 600; }
+.quiz-card .fb-meaning { margin-top: 10px; }
 
 .quiz-feedback { margin-top: 14px; }
 .quiz-feedback.ok, .quiz-feedback.bad { animation: rise 0.2s ease-out; }
@@ -970,6 +995,7 @@ svg { display: block; flex: none; }
 .fb-answer { color: var(--ink); font-family: var(--serif); font-size: 20px; }
 .fb-line { margin: 6px 0 0; color: var(--muted); font-size: 14px; }
 .fb-input { color: var(--ink); font-family: var(--serif); font-size: 16px; overflow-wrap: anywhere; }
+.fb-form b { color: var(--ink); font-family: var(--serif); font-size: 16px; }
 .fb-meaning { display: flex; align-items: baseline; flex-wrap: wrap; gap: 2px 10px; margin: 8px 0 0; font-size: 15px; line-height: 1.5; }
 .fb-meaning b { font-family: var(--serif); font-size: 17px; }
 .fb-meaning span { color: var(--muted); }
@@ -1085,6 +1111,7 @@ svg { display: block; flex: none; }
 
 .field-label .req { color: var(--accent); }
 .field-hint { margin: 6px 2px 0; color: var(--muted); font-size: 12px; line-height: 1.5; }
+.field-hint.warn { color: var(--red); }
 
 .input {
   display: block;
@@ -1514,6 +1541,9 @@ button.set-row.danger, button.set-row.danger > svg { color: var(--red); }
 }
 
 .sheet-foot .btn { flex: 1; }
+/* Two steps, one under the other (請 Claude 補例句: copy, then paste). */
+.sheet-foot.stack { flex-direction: column; }
+.sheet-foot.stack .btn { flex: none; width: 100%; }
 
 .menu {
   flex: 1 1 auto;

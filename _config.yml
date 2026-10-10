@@ -1,0 +1,7 @@
+# GitHub Pages (Jekyll): publish only the app. The test pages must not run on the same origin as
+# the app (they use its localStorage), and the developer tools are not needed on the site.
+exclude:
+  - tests
+  - tools
+  - dist
+  - build.py

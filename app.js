@@ -23,6 +23,8 @@
  *                       screenshots); pass null to go back to the real values. Re-renders.
  *   setRandom(fn)       fn() -> number in [0, 1); replaces Math.random for picking quiz questions and
  *                       answer order and for the flashcard shuffle seed (pass null to reset)
+ * Storage key: localStorage 'vocabcards.v1'; ?sk=<name> in the URL (or window.VC_STORAGE_KEY, set
+ * before app.js loads — tests that run the app without a URL) uses another key.
  *
  * Routes: #/  #/deck/<deckId>  #/deck/<deckId>/words  #/cards/<deckId>  #/quiz/<deckId>/choice
  *         #/quiz/<deckId>/spell  #/import  #/settings          (v1 links #/study/<deckId> open the deck)
@@ -39,30 +41,39 @@
  *   Deck menu sheet-browse, sheet-settings, sheet-export, sheet-delete
  *   Deck hub  back, deck-settings, word count #hub-count 「共 N 字」;
  *             tiles hub-cards, hub-choice, hub-spell (.tile; .tile-meta on the right: 「看到第 12 張」,
- *             「上次 8/10」, 「可出 32 題」; a tile that cannot make any question is disabled and says why
- *             in .tile-desc); questions per quiz quiz-count-10, quiz-count-20, quiz-count-all (aria-pressed;
- *             only the counts that fit the deck are offered; a deck of 10 words or fewer shows the text
- *             #quiz-count-fixed 「全部 (8)」 instead); hub-words (瀏覽與編輯單字);
+ *             「上次 8/10」, 「可出 32 題」, 「繼續第 4 題」 for a quiz left unfinished (the tile continues it);
+ *             a tile that cannot make any question is disabled and says why in .tile-desc);
+ *             add-examples (請 Claude 補例句, when half the words or more have no example); questions per
+ *             quiz quiz-count-10, quiz-count-20, quiz-count-all (aria-pressed; only the counts that fit
+ *             the deck are offered; a deck of 10 words or fewer shows the text #quiz-count-fixed
+ *             「全部 (8)」 instead); hub-words (瀏覽與編輯單字);
  *             empty deck (#hub-empty): import-to-deck, add-card
+ *   Examples sheet (add-examples): copy-examples-prompt (rules + the deck as a text file, for Claude),
+ *             paste-examples (the import screen for this deck, 更新內容 selected)
  *   Cards     back, shuffle (aria-pressed), edit-card, card (the tappable flashcard #flash-card
- *             [data-card-id], .flipped while its back shows), speak, prev, flip, next;
+ *             [data-card-id], .flipped while its back shows), speak, prev, flip (aria-pressed), next;
  *             progress text #flash-progress 「12 / 40」; swipe left/right on the card = next/prev;
- *             end view #flash-end: flash-restart, flash-to-choice, flash-to-spell, flash-home
+ *             end view #flash-end: flash-restart, flash-to-choice, flash-to-spell, flash-home, and
+ *             .done-note + add-examples when there are no spelling questions
  *   Quiz      quiz-quit (✕), counter #quiz-count 「3 / 10」, speak; feedback #quiz-feedback (.ok / .bad);
  *             quiz-next (下一題, 「看結果」 on the last question); the question (.quiz-prompt for choice,
  *             .quiz-card for spell) has data-card-id of the card it asks
  *             choice: options option-0 .. option-3 (.opt; once answered the right one has .correct, a
- *               wrong pick .wrong, the tapped one .chosen); the example then shows in .quiz-explain
+ *               wrong pick .wrong, the tapped one .chosen); the example then shows in .quiz-explain.
+ *               Options are VC.quizMeaning of the meanings (notes with English left out).
  *             spell: sentence .cloze with the hidden word .cloze-mask (its text is the mask, e.g.
- *               a_______d; after answering a <mark> with the word), hint .quiz-hint, input #spell-input,
- *               spell-submit, spell-giveup (不會，看答案)
+ *               a_______d; after answering a <mark> with the word), hint .quiz-hint and spell-giveup
+ *               (不會，看答案) in .quiz-card-foot, input #spell-input, spell-submit; a wrong answer shows
+ *               .fb-meaning in the card and .fb-form when only the form was wrong
  *             results #quiz-results: #quiz-score 「8 / 10」, wrong words .wrong-list (rows .wl-row
  *               [data-card-id]), retry-wrong (only when something was wrong), quiz-again, quiz-home;
- *             no question possible: #quiz-empty with quiz-home
+ *             no question possible: #quiz-empty with quiz-home (and add-examples)
  *   Browse    back, deck-settings, add-card, card-row (data-card-id; pill .p-wrong 「錯 N」 when the word
- *             was answered wrong in a quiz), show-more, search input #browse-search, clear-search;
- *             empty deck: .list-empty with import-to-deck
- *   Card sheet inputs #f-word #f-phonetic #f-meaning #f-example #f-exampleZh #f-note;
+ *             was answered wrong in a quiz, .p-nospell 「不考拼字」 when its example lacks the word),
+ *             show-more, search input #browse-search, clear-search; empty deck: .list-empty with
+ *             import-to-deck
+ *   Card sheet inputs #f-word #f-phonetic #f-meaning #f-example #f-exampleZh #f-note; under the
+ *             example #f-example-hint (what the spelling quiz asks, .warn when the word is not found);
  *             quiz record .sheet-meta 「測驗：答對 x・答錯 y」 (when there is one);
  *             card-save, card-save-next (new cards only), card-delete
  *   Deck settings sheet input #ds-name; 字卡正面 dir-en2zh (英文) / dir-zh2en (中文),
@@ -83,7 +94,7 @@
   'use strict';
 
   var VC = window.VC;
-  var APP_VERSION = '2.0'; // must equal VC.version in core.js
+  var APP_VERSION = '2.1'; // must equal VC.version in core.js (and VERSION in sw.js)
 
   /* =====================================================================================
    * Small utilities
@@ -230,8 +241,8 @@
 
   var STORAGE_KEY = (function () {
     try {
-      var sk = new URLSearchParams(location.search).get('sk');
-      if (sk) return sk;
+      var sk = new URLSearchParams(location.search).get('sk') || window.VC_STORAGE_KEY;
+      if (sk) return String(sk);
     } catch (e) { /* old browsers: fall through */ }
     return 'vocabcards.v1';
   })();
@@ -274,8 +285,17 @@
     return { direction: d && d.direction === 'zh2en' ? 'zh2en' : 'en2zh' };
   }
 
-  /** Flashcard position of a deck: index into the (possibly shuffled) order. */
+  /**
+   * Flashcard position of a deck: index into the (possibly shuffled) order, and cardId = the card
+   * shown there (once one was shown), so the place is kept when cards are added or deleted.
+   */
   function freshFlash() { return { index: 0, shuffle: false, seed: 0 }; }
+
+  function normalizeFlash(fl) {
+    var out = { index: clampInt(fl.index, 0, 1e7, 0), shuffle: !!fl.shuffle, seed: (+fl.seed || 0) >>> 0 };
+    if (fl.cardId && typeof fl.cardId === 'string') out.cardId = fl.cardId;
+    return out;
+  }
 
   /** deck.lastQuiz: { choice?: { score, total, at }, spell?: … } — the last finished quiz of each kind. */
   function normalizeLastQuiz(raw) {
@@ -306,7 +326,7 @@
       s.decks.push({
         id: String(d.id), name: str(d.name).trim() || '未命名牌組', created: +d.created || now(),
         settings: { direction: set.direction === 'zh2en' ? 'zh2en' : 'en2zh' },
-        flash: { index: clampInt(fl.index, 0, 1e7, 0), shuffle: !!fl.shuffle, seed: (+fl.seed || 0) >>> 0 },
+        flash: normalizeFlash(fl),
         lastQuiz: normalizeLastQuiz(d.lastQuiz)
       });
     });
@@ -484,7 +504,8 @@
    * theirs = what the other tab saved since. Cards, decks and settings changed (or added or
    * deleted) only here keep this tab's version. A card changed in both keeps the text edited
    * here (else theirs) and the quiz answers of both tabs add up; a deck changed in both keeps
-   * this tab's version plus the latest quiz result of each kind.
+   * the name, settings and flashcard place changed here (else theirs) and the latest quiz result
+   * of each kind.
    */
   function mergeStates(base, mine, theirs) {
     var same = function (a, b) { return JSON.stringify(a) === JSON.stringify(b); };
@@ -507,11 +528,12 @@
       return out;
     };
     var merged = theirs;
-    merged.decks = mergeList(base.decks, mine.decks, theirs.decks, function (m, t) {
-      var d = clone(m);
+    merged.decks = mergeList(base.decks, mine.decks, theirs.decks, function (m, t, b) {
+      var d = clone(t);
+      ['name', 'settings', 'flash'].forEach(function (f) { if (!same(m[f], b[f])) d[f] = clone(m[f]); });
       QUIZ_MODES.forEach(function (k) {
-        var tq = t.lastQuiz[k];
-        if (tq && (!d.lastQuiz[k] || tq.at > d.lastQuiz[k].at)) d.lastQuiz[k] = tq;
+        var mq = m.lastQuiz[k];
+        if (mq && (!d.lastQuiz[k] || mq.at > d.lastQuiz[k].at)) d.lastQuiz[k] = mq;
       });
       return d;
     });
@@ -1163,6 +1185,9 @@
     } catch (e) { /* speech is best-effort */ }
   }
 
+  /** A headword read aloud without its notation ("send sb off" → "send somebody off", no "+ V-ing"). */
+  function speakWord(word) { speak(VC.speakableWord ? VC.speakableWord(word) : word); }
+
   /* =====================================================================================
    * Shared UI pieces
    * ===================================================================================== */
@@ -1186,19 +1211,28 @@
     var app = document.getElementById('app');
     var same = key === lastRenderKey;
     var y = window.pageYOffset || 0;
+    // The same screen drawn again (a flip, the next card): the button just used keeps the focus,
+    // so keyboard and screen-reader users stay where they were.
+    var active = document.activeElement;
+    var focusAction = same && active && active !== document.body && app.contains(active) ? active.getAttribute('data-action') : null;
     if (same) el.classList.add('no-anim');
     clear(app);
     app.appendChild(el);
     lastRenderKey = key;
     window.scrollTo(0, same ? y : 0);
+    var again = focusAction && el.querySelector('[data-action="' + cssEscape(focusAction) + '"]');
+    if (again && !again.disabled && again.focus) {
+      try { again.focus({ preventScroll: true }); } catch (e) { /* ignore */ }
+    }
   }
 
+  /** hint: a text, or an element (e.g. one that changes while typing). */
   function field(label, control, hint, required) {
     var isInput = /^(INPUT|TEXTAREA|SELECT)$/.test(control.tagName);
     return h(isInput ? 'label' : 'div', { class: 'field' },
       h('span', { class: 'field-label' }, label, required ? h('span', { class: 'req', text: '*' }) : null),
       control,
-      hint ? h('p', { class: 'field-hint', text: hint }) : null);
+      hint ? (hint.nodeType ? hint : h('p', { class: 'field-hint', text: hint })) : null);
   }
 
   /** Segmented control. options: [{ value, label, action }] */
@@ -1568,9 +1602,21 @@
     return NO_QUESTION[mode];
   }
 
-  /** Meaning text the way the quiz compares it: one line, trimmed, case-insensitive. */
+  /** Half the words or more have no example sentence: the spelling quiz needs them (請 Claude 補例句). */
+  function needsExamples(deckCards) {
+    var missing = deckCards.filter(function (c) { return !str(c.example).trim(); }).length;
+    return missing > 0 && missing * 2 >= deckCards.length;
+  }
+
+  /** 「請 Claude 補例句」: a text link that opens the sheet explaining how. */
+  function examplesLink(deckId) {
+    return h('button', { type: 'button', class: 'text-link examples-link', 'data-action': 'add-examples',
+      onclick: function () { openExamplesSheet(deckId); } }, icon('sparkle'), '請 Claude 幫這個牌組補例句');
+  }
+
+  /** Meaning text the way the choice quiz compares it (VC.quizMeaning, then VC.meaningKey). */
   function meaningKey(meaning) {
-    return VC.meaningKey ? VC.meaningKey(meaning) : oneLine(meaning).trim().toLowerCase();
+    return VC.meaningKey(VC.quizMeaning(meaning));
   }
 
   /**
@@ -1602,6 +1648,12 @@
   function openQuiz(deckId, mode) {
     startQuiz(deckId, mode);
     return go(quizHash(deckId, mode));
+  }
+
+  /** A quiz of this kind left half-way (e.g. with the back gesture): its deck tile continues it. */
+  function unfinishedQuiz(deckId, mode) {
+    return quiz && quiz.deckId === deckId && quiz.mode === mode && !quiz.finished &&
+      quiz.questions.some(function (q) { return q.result; }) ? quiz : null;
   }
 
   /** o: { action, icon, title, desc, meta: [Node|null] (right of the title), disabled, onclick } */
@@ -1652,6 +1704,14 @@
         var r = deck.lastQuiz[mode];
         return r ? meta('上次 ' + r.score + '/' + r.total, 'meta-score') : null;
       };
+      // An unfinished quiz (left with the back gesture) goes on where it was; else a fresh set.
+      var resume = function (mode) {
+        var u = unfinishedQuiz(deckId, mode);
+        return u ? meta('繼續第 ' + (u.i + 1) + ' 題', 'meta-score') : null;
+      };
+      var start = function (mode) {
+        if (unfinishedQuiz(deckId, mode)) go(quizHash(deckId, mode)); else openQuiz(deckId, mode);
+      };
       var pos = deck.flash.index;
       content.appendChild(h('p', { class: 'hub-count', id: 'hub-count', text: '共 ' + fmtNum(n) + ' 字' }));
       content.appendChild(h('div', { class: 'tiles' },
@@ -1660,12 +1720,13 @@
           onclick: function () { go(cardsHash(deckId)); } }),
         hubTile({ action: 'hub-choice', icon: 'choice', title: '選擇題',
           desc: can.choice ? '看英文，選出中文意思' : NO_QUESTION.choice, disabled: !can.choice,
-          meta: can.choice ? [last('choice')] : [],
-          onclick: function () { openQuiz(deckId, 'choice'); } }),
+          meta: can.choice ? [resume('choice') || last('choice')] : [],
+          onclick: function () { start('choice'); } }),
         hubTile({ action: 'hub-spell', icon: 'spell', title: '拼字題',
           desc: can.spell ? '看例句，拼出單字' : noQuestionText('spell', cards), disabled: !can.spell,
-          meta: can.spell ? [last('spell'), can.spell < n ? meta('可出 ' + can.spell + ' 題') : null] : [],
-          onclick: function () { openQuiz(deckId, 'spell'); } })));
+          meta: can.spell ? [resume('spell') || last('spell'), can.spell < n ? meta('可出 ' + can.spell + ' 題') : null] : [],
+          onclick: function () { start('spell'); } })));
+      if (needsExamples(cards)) content.appendChild(h('div', { class: 'hub-examples' }, examplesLink(deckId)));
       content.appendChild(h('div', { class: 'group hub-more' },
         h('div', { class: 'set-row' }, h('div', { class: 'set-label', text: '每次測驗題數' }), quizCountControl(n)),
         h('button', { type: 'button', class: 'set-row', 'data-action': 'hub-words', onclick: function () { go(wordsHash(deckId)); } },
@@ -1712,14 +1773,24 @@
    * The position (deck.flash) is saved; flipped / end view live in `fc` only.
    * ===================================================================================== */
 
-  // { deckId, flipped, end, enter: 'in' | 'next' | 'prev' | '', shown (cards shown so far), spoken }
+  // { deckId, flipped, end, enter: 'in' | 'next' | 'prev' | '', shown (cards shown so far), spoken,
+  //   undoShuffle?: { index, shown } (the place before 隨機 was turned on, while no other card was shown) }
   var fc = null;
   var lastSwipeAt = -1e9; // perfNow() of the last swipe (the tap that ends it must not flip the card)
 
-  /** The deck's cards in flashcard order: as added, or shuffled with the deck's saved seed. */
+  /**
+   * The deck's cards in flashcard order: as added, or shuffled with the deck's saved seed (an order
+   * that stays the same for the other cards when one is added or deleted).
+   */
   function flashOrder(deck) {
     var cards = cardsOfDeck(deck.id);
-    return deck.flash.shuffle ? VC.shuffle(cards, VC.seededRng(deck.flash.seed)) : cards;
+    return deck.flash.shuffle ? VC.seededOrder(cards, deck.flash.seed) : cards;
+  }
+
+  /** Move to index in the flashcard order (the card there is remembered once it is shown). */
+  function setFlashIndex(fl, index) {
+    fl.index = index;
+    delete fl.cardId;
   }
 
   function renderCards(deckId) {
@@ -1729,11 +1800,21 @@
     if (!fc || fc.deckId !== deckId || lastRenderKey !== key) {
       fc = { deckId: deckId, flipped: false, end: false, enter: 'in', shown: 0, spoken: '' };
     }
+    var fl = deck.flash;
     var order = flashOrder(deck);
     var n = order.length;
-    var index = Math.max(0, Math.min(deck.flash.index, n - 1)); // cards may have been deleted
-    if (index !== deck.flash.index) { deck.flash.index = index; scheduleSave(); }
+    // Cards added or deleted since: the card that was on screen keeps its place (if it is still there).
+    var index = fl.index;
+    if (fl.cardId && !(order[index] && order[index].id === fl.cardId)) {
+      for (var j = 0; j < n; j++) if (order[j].id === fl.cardId) { index = j; break; }
+    }
+    index = Math.max(0, Math.min(index, n - 1)); // the last cards may have been deleted
     var card = n && !fc.end ? order[index] : null;
+    if (index !== fl.index || (card && fl.cardId !== card.id)) {
+      fl.index = index;
+      if (card) fl.cardId = card.id;
+      scheduleSave();
+    }
 
     var shuffleBtn = iconBtn('shuffle', '隨機順序', 'shuffle', function () { toggleShuffle(deckId); });
     shuffleBtn.setAttribute('aria-pressed', String(deck.flash.shuffle));
@@ -1763,14 +1844,17 @@
     // 自動朗讀: the English word, once each time it comes into view.
     if (card && state.prefs.autoSpeak && (deck.settings.direction !== 'zh2en' || fc.flipped)) {
       var tag = card.id + ':' + fc.shown;
-      if (fc.spoken !== tag) { fc.spoken = tag; speak(card.word); }
+      if (fc.spoken !== tag) { fc.spoken = tag; speakWord(card.word); }
     }
   }
 
   function flashCardView(deck, card) {
     var zh2en = deck.settings.direction === 'zh2en';
+    // 中文 front: the meaning without notes that show the English ("n. 燈籠 → Lantern Festival");
+    // the whole meaning then comes on the back.
+    var shown = zh2en ? VC.quizMeaning(card.meaning) : '';
     var front = zh2en
-      ? h('div', { class: 'card-front' }, h('h2', { class: 'front-meaning', text: card.meaning }))
+      ? h('div', { class: 'card-front' }, h('h2', { class: 'front-meaning', text: shown }))
       : h('div', { class: 'card-front' },
           h('h2', { class: 'word ' + lenClass(card.word), lang: 'en', text: card.word }),
           phoneticRow(card));
@@ -1778,7 +1862,8 @@
       zh2en
         ? h('div', { class: 'back-word' },
             h('h3', { class: 'word ' + lenClass(card.word), lang: 'en', text: card.word }), phoneticRow(card))
-        : h('p', { class: 'meaning', text: card.meaning }),
+        : null,
+      !zh2en || shown !== card.meaning ? h('p', { class: 'meaning', text: card.meaning }) : null,
       exampleBlock(card),
       card.note ? h('p', { class: 'note', text: card.note }) : null) : null;
 
@@ -1803,7 +1888,8 @@
       h('div', { class: 'fc-nav' },
         h('button', { type: 'button', class: 'btn btn-secondary', 'data-action': 'prev', disabled: index === 0,
           onclick: function () { flashStep(-1); } }, icon('back'), h('span', { text: '上一張' })),
-        h('button', { type: 'button', class: 'btn btn-primary', 'data-action': 'flip', text: '翻面', onclick: flipCard }),
+        h('button', { type: 'button', class: 'btn btn-primary', 'data-action': 'flip', text: '翻面',
+          'aria-pressed': String(!!fc.flipped), onclick: flipCard }),
         h('button', { type: 'button', class: 'btn btn-secondary', 'data-action': 'next',
           onclick: function () { flashStep(1); } }, h('span', { text: '下一張' }), icon('chevron'))),
       h('p', { class: 'kbd-hint', text: '← → 換卡 · 空白鍵 翻面 · S 朗讀' }));
@@ -1818,6 +1904,9 @@
         onclick: function () { openQuiz(deck.id, 'choice'); } }, icon('choice'), '選擇題測驗'),
       h('button', { type: 'button', class: 'btn btn-tonal btn-lg', 'data-action': 'flash-to-spell', disabled: !can.spell,
         onclick: function () { openQuiz(deck.id, 'spell'); } }, icon('spell'), '拼字題測驗'),
+      // No spelling questions: say why, and how to get example sentences.
+      can.spell ? null : h('p', { class: 'done-note', text: '拼字題：' + noQuestionText('spell', order) }),
+      !can.spell && needsExamples(order) ? examplesLink(deck.id) : null,
       h('button', { type: 'button', class: 'btn btn-ghost btn-lg', 'data-action': 'flash-home', text: '回到牌組',
         onclick: function () { goBackTo(deckHash(deck.id)); } })]);
     enableSwipe(view, null, function () { flashStep(-1); }, false); // swipe right: back to the last card
@@ -1839,12 +1928,12 @@
     if (fc.end) {
       if (delta > 0) return;
       fc.end = false;
-      fl.index = n - 1;
+      setFlashIndex(fl, n - 1);
     } else {
       var i = Math.min(fl.index, n - 1) + delta;
       if (i < 0) return;
-      if (i < n) fl.index = i;
-      else { fc.end = true; fl.index = 0; } // seen them all: next time starts from the first card
+      if (i < n) setFlashIndex(fl, i);
+      else { fc.end = true; setFlashIndex(fl, 0); } // seen them all: next time starts from the first card
     }
     fc.flipped = false; // a new card always shows its front
     fc.enter = delta > 0 ? 'next' : 'prev';
@@ -1856,7 +1945,7 @@
   function restartFlash() {
     var deck = fc && deckById(fc.deckId);
     if (!deck) return;
-    deck.flash.index = 0;
+    setFlashIndex(deck.flash, 0);
     fc.end = false;
     fc.flipped = false;
     fc.enter = 'in';
@@ -1865,21 +1954,28 @@
     renderCards(deck.id);
   }
 
-  /** Shuffle on: a new random order from the first card. Off: the original order, same card. */
+  /**
+   * Shuffle on: a new random order from the first card. Off: the original order, same card — or,
+   * when no other card was shown since it was turned on (a tap by mistake), back where it was.
+   */
   function toggleShuffle(deckId) {
     var deck = deckById(deckId);
     if (!deck || !fc) return;
     var fl = deck.flash;
+    var undo = fc.undoShuffle;
+    fc.undoShuffle = null;
     if (fl.shuffle) {
       var order = flashOrder(deck);
       var cur = fc.end ? null : order[Math.min(fl.index, order.length - 1)];
       fl.shuffle = false;
-      fl.index = cur ? Math.max(0, cardsOfDeck(deckId).indexOf(cur)) : 0;
+      setFlashIndex(fl, undo && undo.shown === fc.shown ? undo.index : cur ? Math.max(0, cardsOfDeck(deckId).indexOf(cur)) : 0);
       toast('已恢復原本順序');
     } else {
+      var before = fc.end ? 0 : fl.index;
       fl.shuffle = true;
       fl.seed = Math.floor(rand() * 4294967296) >>> 0;
-      fl.index = 0;
+      setFlashIndex(fl, 0);
+      fc.undoShuffle = { index: before, shown: fc.shown + 1 };
       toast('已隨機排序');
     }
     fc.end = false;
@@ -1938,7 +2034,7 @@
 
   function speakButton(word) {
     if (!tts.supported) return null;
-    return iconBtn('speaker', '朗讀', 'speak', function (e) { e.stopPropagation(); speak(word); }, 'speak-btn');
+    return iconBtn('speaker', '朗讀', 'speak', function (e) { e.stopPropagation(); speakWord(word); }, 'speak-btn');
   }
 
   /** Phonetic + 🔊 of { word, phonetic } (a card or a quiz question). */
@@ -1956,25 +2052,16 @@
       card.exampleZh ? h('p', { class: 'example-zh', text: card.exampleZh }) : null);
   }
 
-  /** DOM nodes for `sentence` with every occurrence of the headword (VC.headwordRegex) in a <mark>. */
+  /** DOM nodes for `sentence` with every occurrence of the headword (VC.findHeadwords) in a <mark>. */
   function highlightNodes(sentence, word) {
-    var re = VC.headwordRegex(word);
-    if (!re) return [document.createTextNode(sentence)];
-    if (!re.global) re = new RegExp(re.source, re.flags + 'g');
     var nodes = [];
     var last = 0;
-    var m;
-    while ((m = re.exec(sentence)) !== null) {
-      // Group 1: the character before the word (or ''), group 2: the word itself.
-      var text = m[2] !== undefined ? m[2] : m[0];
-      var start = m.index + (m[2] !== undefined ? (m[1] || '').length : 0);
-      if (text) {
-        if (start > last) nodes.push(document.createTextNode(sentence.slice(last, start)));
-        nodes.push(h('mark', { text: text }));
-        last = start + text.length;
-      }
-      if (re.lastIndex <= m.index) re.lastIndex = m.index + 1;
-    }
+    VC.findHeadwords(sentence, word).forEach(function (hit) {
+      if (hit.index < last) return;
+      if (hit.index > last) nodes.push(document.createTextNode(sentence.slice(last, hit.index)));
+      nodes.push(h('mark', { text: hit.text }));
+      last = hit.index + hit.text.length;
+    });
     if (last < sentence.length) nodes.push(document.createTextNode(sentence.slice(last)));
     return nodes;
   }
@@ -1982,24 +2069,43 @@
   /* =====================================================================================
    * Quiz (#/quiz/<deckId>/choice | spell)
    *
-   * quiz = { id, deckId, mode, questions, i, retry, finished, timer, answeredAt, enter, spoken, ui }
+   * quiz = { id, deckId, mode, questions, i, retry, finished, timer, answeredAt, shownAt, enter, spoken, ui }
    *   questions  from VC.buildQuiz; an answered question gets
-   *              q.result = { correct, chosen? (choice), input?, gaveUp? (spell), word, meaning }
+   *              q.result = { correct, chosen? (choice), input?, gaveUp?, otherForm? (spell), word, meaning }
    *   retry      a 「重測答錯的題目」 round: its score is not kept as the deck's last result
+   *   answeredAt, shownAt  perfNow() of the last answer / of the question coming up (tap guards)
    *   ui         the parts of the question screen that change in place. The next question re-uses
    *              the same answer box, so the phone keyboard stays open from question to question.
-   * The session is in memory only: back and then forward again continues it; every way of
-   * starting a quiz (deck tiles, 「再測一次」, the end of the flashcards) makes a fresh set.
+   * The session is in memory only: back and then forward again continues it, and so does the
+   * deck tile of an unfinished quiz with answers; 「再測一次」, the end of the flashcards and the
+   * tiles otherwise make a fresh set. 「結束」 in the ✕ dialog throws the session away.
    * ===================================================================================== */
 
   var quiz = null;
   var quizSerial = 0;
+  // A tap within this long after a new question came up was meant for the screen before (a tap to
+  // skip the wait, a double tap on 再測一次): it does not answer.
+  var NEW_QUESTION_GUARD_MS = 350;
+  // … and within this long after a wrong spelling, a second tap on the same spot (確認 → 下一題) or a
+  // second Enter does not hide the correction.
+  var WRONG_ANSWER_GUARD_MS = 500;
 
   function newQuizSession(deckId, mode, questions, retry) {
     return {
       id: ++quizSerial, deckId: deckId, mode: mode, questions: questions, i: 0, retry: !!retry,
-      finished: false, timer: null, answeredAt: 0, enter: true, spoken: '', ui: null
+      finished: false, timer: null, answeredAt: 0, shownAt: perfNow(), enter: true, spoken: '', ui: null
     };
+  }
+
+  /** A pointer tap (click events from keys and el.click() have detail 0) right after time `since`. */
+  function tooSoon(e, since, ms) {
+    return !!(e && e.detail > 0 && perfNow() - since < ms);
+  }
+
+  /** The current question was just answered wrong (see WRONG_ANSWER_GUARD_MS). */
+  function justMissed() {
+    var q = currentQuestion();
+    return !!(q && q.result && !q.result.correct && perfNow() - quiz.answeredAt < WRONG_ANSWER_GUARD_MS);
   }
 
   function startQuiz(deckId, mode) {
@@ -2029,10 +2135,13 @@
     var title = QUIZ_TITLES[mode];
     var quit = iconBtn('close', quiz.finished ? '關閉' : '結束測驗', 'quiz-quit', quitQuiz);
     if (!quiz.questions.length) {
-      var why = noQuestionText(mode, cardsOfDeck(deckId)) + (mode === 'spell' ? '。\n可以在「瀏覽與編輯單字」裡，幫單字加上含有它的例句。' : '。');
+      var deckCards = cardsOfDeck(deckId);
+      var why = noQuestionText(mode, deckCards) + (mode === 'spell' ? '。\n可以在「瀏覽與編輯單字」裡，幫單字加上含有它的例句。' : '。');
       mount(screen('quiz', [topbar(title, quit), messageView('quiz-empty', '🤔', '沒辦法出' + title, why, [
         h('button', { type: 'button', class: 'btn btn-primary btn-lg', 'data-action': 'quiz-home', text: '回到牌組',
-          onclick: function () { goBackTo(deckHash(deckId)); } })])]), 'quiz-empty:' + deckId);
+          onclick: function () { goBackTo(deckHash(deckId)); } }),
+        mode === 'spell' && deckCards.length && needsExamples(deckCards) ? examplesLink(deckId) : null])]),
+        'quiz-empty:' + deckId);
       return;
     }
     if (quiz.finished) {
@@ -2056,8 +2165,10 @@
     if (spell) {
       buildSpellControls(ui);
       if (prev && prev.input) ui.input.value = prev.input.value; // re-rendered while typing
+      // 不會，看答案 sits in the sentence card (fillSpell), above the input: with the phone keyboard
+      // up, the space below the input is covered.
       body = [ui.prompt,
-        h('div', { class: 'spell-form' }, h('div', { class: 'spell-row' }, ui.input, ui.submit, ui.next), ui.giveup),
+        h('div', { class: 'spell-form' }, h('div', { class: 'spell-row' }, ui.input, ui.submit, ui.next)),
         ui.feedback];
     } else {
       ui.options = h('div', { role: 'group', 'aria-label': '選出中文意思' });
@@ -2094,9 +2205,12 @@
   function fillChoice(q) {
     var ui = quiz.ui;
     var res = q.result;
+    // The options and 下一題 are drawn anew: a keyboard / screen-reader user keeps a place to be.
+    var hadFocus = ui.options.contains(document.activeElement) || ui.bottom.contains(document.activeElement);
     clear(ui.prompt);
     ui.prompt.className = 'quiz-prompt' + (quiz.enter ? ' enter' : '');
-    ui.prompt.appendChild(h('h2', { class: 'word ' + lenClass(q.word), lang: 'en', text: q.word }));
+    var word = h('h2', { class: 'word ' + lenClass(q.word), lang: 'en', text: q.word, tabindex: '-1' });
+    ui.prompt.appendChild(word);
     append(ui.prompt, phoneticRow(q));
 
     clear(ui.options);
@@ -2106,7 +2220,11 @@
       ui.options.appendChild(h('button', {
         type: 'button', class: 'opt' + mark + (res && i === res.chosen ? ' chosen' : ''),
         'data-action': 'option-' + i, 'aria-disabled': res ? 'true' : null,
-        onclick: function () { answerChoice(i); }
+        'aria-label': mark === ' correct' ? '正確答案：' + oneLine(text) : mark === ' wrong' ? '你選的（答錯）：' + oneLine(text) : null,
+        onclick: function (e) {
+          if (tooSoon(e, quiz.shownAt, NEW_QUESTION_GUARD_MS)) return; // meant for the screen before
+          answerChoice(i);
+        }
       },
         h('span', { class: 'opt-key', 'aria-hidden': 'true', text: String(i + 1) }),
         h('span', { class: 'opt-text', text: oneLine(text) }),
@@ -2123,9 +2241,11 @@
     append(ui.explain, ex);
 
     clear(ui.bottom);
-    if (res) {
-      ui.bottom.appendChild(h('button', { type: 'button', class: 'btn btn-primary btn-lg', 'data-action': 'quiz-next',
-        text: nextLabel(), onclick: nextQuestion }));
+    var next = res ? h('button', { type: 'button', class: 'btn btn-primary btn-lg', 'data-action': 'quiz-next',
+      text: nextLabel(), onclick: nextQuestion }) : null;
+    append(ui.bottom, next);
+    if (hadFocus && (!document.activeElement || document.activeElement === document.body)) {
+      try { (next || word).focus({ preventScroll: true }); } catch (e) { /* ignore */ }
     }
   }
 
@@ -2163,7 +2283,8 @@
       e.preventDefault();
       if (e.repeat) return;
       var q = currentQuestion();
-      if (q && q.result) nextQuestion(); else submitSpell(false);
+      if (!q || !q.result) submitSpell(false);
+      else if (!justMissed()) nextQuestion(); // a quick second Enter must not hide the correction
     });
     // Answered: the box keeps what was typed. It is not made read-only, so it keeps the focus and
     // the phone keyboard stays up for the next question.
@@ -2171,8 +2292,9 @@
     ui.input.addEventListener('input', function () { if (ui.locked) ui.input.value = ui.lockedValue; });
     ui.submit = keepFocus(h('button', { type: 'button', class: 'btn btn-primary', 'data-action': 'spell-submit',
       text: '確認', onclick: function () { submitSpell(false); } }));
+    // 下一題 takes the place of 確認: a double tap on 確認 must not skip the correction of a wrong answer.
     ui.next = keepFocus(h('button', { type: 'button', class: 'btn btn-primary', 'data-action': 'quiz-next',
-      onclick: nextQuestion }));
+      onclick: function (e) { if (!(e && e.detail > 0 && justMissed())) nextQuestion(); } }));
     ui.giveup = keepFocus(h('button', { type: 'button', class: 'text-link spell-giveup', 'data-action': 'spell-giveup',
       text: '不會，看答案', onclick: function () { submitSpell(true); } }));
   }
@@ -2192,11 +2314,19 @@
     var cz = q.cloze;
     clear(ui.prompt);
     ui.prompt.className = 'quiz-card' + (quiz.enter ? ' enter' : '');
+    // Other occurrences of the word in the sentence are masked too until it is answered.
     ui.prompt.appendChild(h('p', { class: 'cloze', lang: 'en' },
-      cz.before,
+      res ? cz.before : cz.beforeMasked != null ? cz.beforeMasked : cz.before,
       res ? h('mark', { class: res.correct ? 'ok' : 'bad', text: cz.answer }) : clozeMask(cz.masked),
-      cz.after));
-    if (q.hint) ui.prompt.appendChild(h('p', { class: 'quiz-hint', text: q.hint }));
+      res ? cz.after : cz.afterMasked != null ? cz.afterMasked : cz.after));
+    ui.giveup.hidden = !!res;
+    ui.prompt.appendChild(h('div', { class: 'quiz-card-foot' },
+      q.hint ? h('p', { class: 'quiz-hint', text: q.hint }) : null, ui.giveup));
+    // A wrong answer: the word and its meaning in the card, which stays in view above the phone keyboard.
+    if (res && !res.correct && res.meaning) {
+      ui.prompt.appendChild(h('p', { class: 'fb-meaning' },
+        h('b', { lang: 'en', text: res.word }), h('span', { text: oneLine(res.meaning) })));
+    }
 
     ui.locked = !!res;
     ui.lockedValue = ui.input.value;
@@ -2204,7 +2334,6 @@
     ui.input.classList.toggle('bad', !!res && !res.correct);
     ui.input.setAttribute('aria-readonly', String(!!res));
     ui.submit.hidden = !!res;
-    ui.giveup.hidden = !!res;
     ui.next.hidden = !res;
     ui.next.textContent = nextLabel();
 
@@ -2220,9 +2349,9 @@
     if (res.input) {
       ui.feedback.appendChild(h('p', { class: 'fb-line' }, '你的答案：', h('span', { class: 'fb-input', lang: 'en', text: res.input })));
     }
-    if (res.meaning) {
-      ui.feedback.appendChild(h('p', { class: 'fb-meaning' },
-        h('b', { lang: 'en', text: res.word }), h('span', { text: oneLine(res.meaning) })));
+    if (res.otherForm) {
+      ui.feedback.appendChild(h('p', { class: 'fb-line fb-form' }, '單字拼對了，但句子裡要用 ',
+        h('b', { lang: 'en', text: cz.answer })));
     }
   }
 
@@ -2231,7 +2360,11 @@
     if (!q || q.result || quiz.mode !== 'spell') return;
     var typed = quiz.ui.input.value.trim();
     if (!giveUp && !typed) { focusSpellInput(); return; } // empty: nothing to check yet
-    q.result = { correct: !giveUp && VC.checkSpelling(typed, q.cloze.answer), input: giveUp ? '' : typed, gaveUp: !!giveUp };
+    var card = cardById(q.cardId);
+    var word = card ? card.word : '';
+    var correct = !giveUp && VC.checkSpelling(typed, q.cloze.answer, word);
+    q.result = { correct: correct, input: giveUp ? '' : typed, gaveUp: !!giveUp,
+      otherForm: !giveUp && !correct && VC.isOtherForm(typed, word, q.cloze.answer) };
     recordAnswer(q);
     fillQuestion();
     if (q.result.correct) {
@@ -2269,6 +2402,7 @@
     if (quiz.i + 1 >= quiz.questions.length) { finishQuiz(); return; }
     quiz.i++;
     quiz.enter = true;
+    quiz.shownAt = perfNow();
     if (!quiz.ui || !document.documentElement.contains(quiz.ui.prompt)) { render(); return; }
     if (quiz.ui.input) quiz.ui.input.value = '';
     window.scrollTo(0, 0);
@@ -2284,7 +2418,7 @@
     var tag = quiz.id + ':' + quiz.i;
     if (quiz.spoken === tag) return;
     quiz.spoken = tag;
-    speak(q.word);
+    speakWord(q.word);
   }
 
   function finishQuiz() {
@@ -2304,8 +2438,10 @@
     stopQuizTimer();
     confirmDialog({ title: '要結束測驗嗎？', message: '這次的成績不會保存。', okText: '結束', cancelText: '繼續作答' })
       .then(function (ok) {
-        if (ok) goBack();
-        else if (quiz && quiz.mode === 'spell') focusSpellInput();
+        if (ok) {
+          quiz = null; // ended: the deck tile starts a fresh set (not 「繼續」)
+          goBack();
+        } else if (quiz && quiz.mode === 'spell') focusSpellInput();
       });
   }
 
@@ -2438,6 +2574,21 @@
       return f;
     }
 
+    // Under the example: what the spelling quiz will ask, or that it cannot find the word.
+    var exampleHint = h('p', { class: 'field-hint', id: 'f-example-hint' });
+    function updateExampleHint() {
+      var w = inputs.word.value.trim();
+      var ex = inputs.example.value.trim();
+      var cz = w && ex ? VC.makeCloze({ word: w, example: ex }) : null;
+      exampleHint.classList.toggle('warn', !!(w && ex && !cz));
+      exampleHint.textContent = !w || !ex ? '例句裡要有這個單字，拼字題才能從例句出題。'
+        : cz ? '拼字題：' + oneLine(cz.beforeMasked + cz.masked + cz.afterMasked)
+        : '例句裡找不到「' + w + '」，拼字題會跳過這張卡（不規則變化、拆開的片語都找不到）。';
+    }
+    inputs.word.addEventListener('input', updateExampleHint);
+    inputs.example.addEventListener('input', updateExampleHint);
+    updateExampleHint();
+
     function save(addAnother) {
       var f = read();
       if (!f.word) { toast('請輸入單字', 'error'); inputs.word.focus(); return; }
@@ -2479,7 +2630,7 @@
       field('單字', inputs.word, null, true),
       field('音標', inputs.phonetic),
       field('中文意思', inputs.meaning, null, true),
-      field('例句', inputs.example, '例句裡要有這個單字，拼字題才能從例句出題。'),
+      field('例句', inputs.example, exampleHint),
       field('例句翻譯', inputs.exampleZh),
       field('備註', inputs.note));
 
@@ -2516,6 +2667,12 @@
   /** 「錯 N」 for a word answered wrong in a quiz, nothing otherwise. */
   function wrongPill(card) {
     return card.wrong > 0 ? h('span', { class: 'pill p-wrong', title: '測驗答錯 ' + card.wrong + ' 次', text: '錯 ' + card.wrong }) : null;
+  }
+
+  /** 「不考拼字」 for a word whose example sentence does not contain it (the spelling quiz skips it). */
+  function noSpellPill(card) {
+    return str(card.example).trim() && !VC.makeCloze(card)
+      ? h('span', { class: 'pill p-nospell', title: '例句裡找不到這個單字，拼字題會跳過', text: '不考拼字' }) : null;
   }
 
   function oneLine(s) { return str(s).replace(/\s*\n\s*/g, '；'); }
@@ -2572,7 +2729,7 @@
             h('div', { class: 'wr-main' },
               h('div', { class: 'wr-word', lang: 'en', text: c.word }),
               h('div', { class: 'wr-meaning', text: oneLine(c.meaning) })),
-            wrongPill(c)));
+            noSpellPill(c), wrongPill(c)));
         });
         list.appendChild(frag);
       };
@@ -2630,6 +2787,10 @@
     'ability | n. 能力 | She has the ability to learn fast. | 她有快速學習的能力。',
     'absent | adj. 缺席的'
   ].join('\n');
+  // How example sentences must be written (rule 8 of CLAUDE_PROMPT; also in EXAMPLES_PROMPT).
+  var EXAMPLE_RULE = '例句要自然、符合高中程度，而且一定要包含這個單字本身或它的規則變化（-s、-es、-ed、-ing、-er、-est、-ly）；' +
+    '不要用不規則變化（例如 take 不要寫成 took、buy 不要寫成 bought），片語要完整出現（give up 可以寫 gives up、giving up，' +
+    '但不要拆成 give it up），因為 App 的拼字測驗會從例句裡把這個字挖空。翻譯用自然的台灣口語。';
   // 「複製給 Claude 的說明」: the generation rules + a fill-in request.
   // Keep identical to the block in 格式說明.md §11 (tests/e2e.html checks this).
   var CLAUDE_PROMPT = [
@@ -2646,8 +2807,8 @@
     '   需要時可以加第 6 欄備註（片語、常見搭配、同反義字），例如：| be reluctant to + V 不情願做……',
     '5. 分隔符號一律用半形 |，前後各空一格；不要用 Tab 或逗號。欄位內容裡不要出現 |（真的需要就寫 \\|），也不要換行（需要時寫 \\n）。',
     '6. 音標用美式（General American）IPA，寫在 /…/ 裡，例如 /əˈbændən/；名詞、動詞唸法不同時都寫在這一欄，例如 /ˈprezənt/ (n.) /prɪˈzent/ (v.)。不確定音標時整欄省略（直接寫 word | pos. 中文意思 | …），不要留空欄。',
-    '7. 中文意思用台灣慣用的繁體中文，詞性縮寫放最前面（n. v. adj. adv. prep. conj. pron. phr. 等）；同一詞性的多個意思用全形分號「；」隔開，不同詞性接著寫，例如 v. 接近；靠近；n. 方法。',
-    '8. 例句要自然、符合高中程度，而且一定要包含這個單字本身或它的規則變化（-s、-es、-ed、-ing、-er、-est、-ly）；不要用不規則變化（例如 take 不要寫成 took、buy 不要寫成 bought），片語要完整出現（give up 可以寫 gives up、giving up，但不要拆成 give it up），因為 App 的拼字測驗會從例句裡把這個字挖空。翻譯用自然的台灣口語。',
+    '7. 中文意思用台灣慣用的繁體中文，詞性縮寫放最前面（n. v. adj. adv. prep. conj. pron. phr. 等）；同一詞性的多個意思用全形分號「；」隔開，不同詞性接著寫，例如 v. 接近；靠近；n. 方法。衍生字、搭配詞這類英文補充寫在第 6 欄備註，不要寫在中文意思裡；片語的句型（+ N、+ V-ing）也寫在備註，例如 look forward to | phr. 期待 | 例句 | 翻譯 | look forward to + N / V-ing。',
+    '8. ' + EXAMPLE_RULE,
     '9. 不要加標題列（例如 word | meaning），同一個單字只寫一行，不要重複。',
     '',
     '範例：',
@@ -2656,6 +2817,49 @@
     'reluctant | /rɪˈlʌktənt/ | adj. 不情願的；勉強的 | He was reluctant to admit his mistake. | 他不太願意承認自己的錯誤。 | be reluctant to + V 不情願做……',
     'give up | phr. 放棄 | Don\'t give up on your dreams. | 不要放棄你的夢想。'
   ].join('\n');
+
+  // 「請 Claude 補例句」: the deck as a text file, with rules for adding example sentences.
+  function examplesPrompt(deck, cards) {
+    return [
+      '下面是我的「單字卡」App 單字檔，請幫每個單字補上例句和例句翻譯，改好的檔案要能直接匯入 App。',
+      '',
+      '請嚴格遵守下面的規則：',
+      '1. #deck: 那一行和每一行的單字都不要改，也不要增加、刪除或合併單字；有音標的照原本的寫。',
+      '2. 每一行寫成：word | /IPA/ | pos. 中文意思 | Natural English example sentence. | 自然的中文翻譯 | 備註（沒有音標就省略音標那一欄，沒有備註就省略最後一欄）。',
+      '3. 中文意思保持原樣；但意思裡 →、← 或括號（…）中的英文補充（衍生字、搭配詞、句型），請搬到第 6 欄備註，中文意思欄只留中文。',
+      '4. ' + EXAMPLE_RULE,
+      '5. 分隔符號一律用半形 |，前後各空一格。只輸出檔案內容，整份放在一個 ```text 程式碼區塊裡。',
+      '',
+      '單字檔：',
+      '```text',
+      VC.serializeDeck(deck.name, cards).trim(),
+      '```'
+    ].join('\n');
+  }
+
+  /** How to get example sentences for a deck (the spelling quiz needs them): Claude adds them. */
+  function openExamplesSheet(deckId) {
+    var deck = deckById(deckId);
+    if (!deck) return;
+    var cards = cardsOfDeck(deckId);
+    var missing = cards.filter(function (c) { return !str(c.example).trim(); }).length;
+    var body = h('div', { class: 'sheet-body examples-help' },
+      h('p', { text: '拼字題要從例句出題，這個牌組有 ' + missing + ' 個單字還沒有例句。可以請 Claude 一次補好：' }),
+      h('ol', null,
+        h('li', { text: '按「複製給 Claude」，貼到 Claude 的對話框送出。' }),
+        h('li', { text: '複製 Claude 的整則回覆，按「貼上 Claude 的回覆」貼進框框。' }),
+        h('li', { text: '確認選的是「更新內容（保留測驗紀錄）」，再按「匯入」。單字的測驗紀錄都會保留。' })));
+    var foot = h('div', { class: 'sheet-foot stack' },
+      h('button', { type: 'button', class: 'btn btn-tonal btn-lg', 'data-action': 'copy-examples-prompt',
+        onclick: function () {
+          copyText(examplesPrompt(deck, cardsOfDeck(deckId))).then(function (ok) {
+            toast(ok ? '已複製！貼給 Claude 就可以了' : '無法複製，請再試一次', ok ? null : 'error');
+          });
+        } }, icon('sparkle'), '複製給 Claude'),
+      h('button', { type: 'button', class: 'btn btn-primary btn-lg', 'data-action': 'paste-examples',
+        onclick: function () { openImport(deckId, true, 'update'); } }, icon('clipboard'), '貼上 Claude 的回覆'));
+    openSheet({ title: '請 Claude 補例句', body: body, foot: foot });
+  }
 
   var imp = { files: [], text: '', target: 'new', names: {}, dupMode: 'skip', focusPaste: false };
   var impUI = null;
@@ -2666,12 +2870,14 @@
 
   /**
    * Open the import screen. deckId: words without #deck go into that deck (opened from an empty
-   * deck); otherwise into a new deck. Text or files still waiting there are kept.
+   * deck); otherwise into a new deck. dupMode: preselect 'update' (Claude's reply with examples
+   * for words already in the deck). Text or files still waiting there are kept.
    */
-  function openImport(deckId, focusPaste) {
+  function openImport(deckId, focusPaste, dupMode) {
     if (!imp.text.trim() && !imp.files.length) resetImport();
     if (deckId) imp.target = deckId;
     if (focusPaste) imp.focusPaste = true;
+    if (dupMode) imp.dupMode = dupMode;
     return go('#/import');
   }
 
@@ -3502,7 +3708,7 @@
       var deck = deckById(fc.deckId);
       var order = deck ? flashOrder(deck) : [];
       var card = order[Math.min(deck ? deck.flash.index : 0, order.length - 1)];
-      if (card && (deck.settings.direction !== 'zh2en' || fc.flipped)) speak(card.word);
+      if (card && (deck.settings.direction !== 'zh2en' || fc.flipped)) speakWord(card.word);
     }
   }
 
@@ -3522,7 +3728,7 @@
         e.preventDefault();
         if (!e.repeat) answerChoice(+k - 1);
       } else if (k === 's' || k === 'S') {
-        speak(q.word);
+        speakWord(q.word);
       }
     } else if (!q.result && k.length === 1) {
       focusSpellInput(); // the key itself then goes into the box
@@ -3543,8 +3749,23 @@
 
   function onVisibility() {
     if (document.visibilityState === 'hidden') { flushSave(); return; }
+    checkForUpdate();
     // Home: the backup reminder counts days, which may have passed while the app was in the background.
     if (!topOverlay() && currentRoute().name === 'home') render();
+  }
+
+  /**
+   * A home-screen app kept in the background never navigates (hash routes), so the browser would
+   * not look for a new version: ask when it comes back (at most once an hour). A new service worker
+   * downloads every file; the next launch is the new version.
+   */
+  var lastUpdateCheck = Date.now();
+  function checkForUpdate() {
+    if (Date.now() - lastUpdateCheck < 3600000 || !navigator.serviceWorker || !navigator.serviceWorker.getRegistration) return;
+    lastUpdateCheck = Date.now();
+    try {
+      navigator.serviceWorker.getRegistration().then(function (r) { if (r) return r.update(); }).catch(function () {});
+    } catch (e) { /* offline support is optional */ }
   }
 
   /**

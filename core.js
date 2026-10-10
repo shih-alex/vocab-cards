@@ -2,10 +2,11 @@
  * 單字卡 core — pure logic shared by the app and the tests. No DOM access.
  *   - text-file format:  parseDeckText / serializeDeck / decodeBytes / normalizeWord
  *   - cards:             newCard
- *   - headwords:         wordForms / headwordRegex / findHeadword  (the word inside its example sentence)
- *   - spelling quiz:     maskWord / makeCloze / checkSpelling
- *   - choice quiz:       posOf / meaningKey / pickChoices
- *   - quizzes:           buildQuiz / quizEligible, with shuffle / seededRng for random order
+ *   - headwords:         wordForms / headwordRegex / findHeadwords / findHeadword  (the word inside its
+ *                        example sentence) / speakableWord
+ *   - spelling quiz:     maskWord / makeCloze / checkSpelling / isOtherForm
+ *   - choice quiz:       quizMeaning / posOf / meaningKey / pickChoices
+ *   - quizzes:           buildQuiz / quizEligible, with shuffle / seededRng / seededOrder for random order
  * Loads as a classic <script> (window.VC) and as a CommonJS module (module.exports).
  */
 (function () {
@@ -681,26 +682,36 @@
 
   // Letters for word boundaries and masking: ASCII plus Latin-1 / Latin Extended (café, naïve).
   const LETTERS = 'A-Za-z\\u00C0-\\u024F';
+  // A headword may also contain digits ("3D printing").
+  const WORD_CHARS = LETTERS + '0-9';
   const LETTER_RUN_RE = new RegExp('[' + LETTERS + ']+', 'g');
   const ONE_RUN_RE = new RegExp('^[' + LETTERS + ']+$');
   const NOT_LETTER_RE = new RegExp('[^' + LETTERS + ']', 'g');
-  const NOT_WORD_CHAR_RE = new RegExp('[^' + LETTERS + '\'’\\- ]', 'g');
+  const NOT_WORD_CHAR_RE = new RegExp('[^' + WORD_CHARS + '\'’\\-]+', 'g');
+  const HAS_WORD_CHAR_RE = new RegExp('[' + WORD_CHARS + ']');
+  const COMBINING_RE = /[̀-ͯ]/g;
   const IRREGULAR = {
     be: ['be', 'am', 'is', 'are', 'was', 'were', 'been', 'being'],
     have: ['have', 'has', 'had', 'having'],
     do: ['do', 'does', 'did', 'done', 'doing'],
     go: ['go', 'goes', 'went', 'gone', 'going'],
   };
-  // Placeholders in a phrase ("take care of sth", "take sb's place", "make up one's mind") are not
-  // in the sentence.
-  const PLACEHOLDER_RE =
-    /(^|\s)(?:(?:sth|sb|something|somebody|someone|one)['’]s|sth|sb|something|somebody|someone|oneself)\.?(?=\s|$)/g;
+  // Stand-ins in a phrase ("remind sb of sth", "not … until …"): the headword ends in front of them.
+  const PLACEHOLDERS = new Set(['sb', 'sth', "sb's", "sth's", 'somebody', 'someone', 'something',
+    "somebody's", "someone's", "something's", '…']);
+  // … but these are real words at the start ("someone else") or after a short word ("or something").
+  const SOFT_PLACEHOLDERS = new Set(['somebody', 'someone', 'something', "somebody's", "someone's", "something's"]);
+  // one's / oneself stand for any possessive / reflexive: "make up one's mind" → "make up your mind".
+  const POSSESSIVE = "(?:my|your|his|her|its|our|their|one['’]s)";
+  const REFLEXIVE = '(?:myself|yourself|himself|herself|itself|ourselves|yourselves|themselves|oneself)';
+  const OPT_MARK = '\u0001'; // a word in brackets that the sentence may leave out: "cast (wooden) blocks"
 
   /**
    * The word (lower-cased) and its regular forms: -s -es -ed -d -ing -ly -er -est, silent e
-   * (making), -le → -ly (simply), consonant + y → -ies -ied -ier -iest -ily (studied), a doubled
-   * final consonant (stopped, bigger, admitted), -ic → -ically (basically); or the forms of
-   * be / have / do / go. Forms that are not real words are harmless: they never occur in a sentence.
+   * (making), -le → -ly (simply), -ll → -lly (fully), -ie → -ying (lying), consonant + y → -ies
+   * -ied -ier -iest -ily (studied), a doubled final consonant (stopped, bigger, admitted, quitting),
+   * -ic → -ically -icked -icking (basically, panicked); or the forms of be / have / do / go.
+   * Forms that are not real words are harmless: they never occur in a sentence.
    */
   function wordForms(word) {
     const w = str(word).trim().toLowerCase();
@@ -712,17 +723,20 @@
       f.push(s + 'ing', s + 'ed', s + 'er', s + 'est');
       if (/le$/.test(w)) f.push(s + 'y'); // simple → simply
     }
+    if (/ie$/.test(w)) f.push(w.slice(0, -2) + 'ying'); // lie → lying
     if (/[^aeiou]y$/.test(w)) {
       const y = w.slice(0, -1); // study → studied, happy → happily
       f.push(y + 'ies', y + 'ied', y + 'ier', y + 'iest', y + 'ily');
     }
+    const v = w.replace(/qu/g, 'q'); // the u of "qu" is not a vowel: quit → quitting, equip → equipped
     const last = w.slice(-1);
-    if (/^[^aeiou]*[aeiou][bdgklmnprt]$/.test(w)) { // one syllable: stop → stopped, big → bigger
+    if (/^[^aeiou]*[aeiou][bdgklmnprt]$/.test(v)) { // one syllable: stop → stopped, big → bigger
       f.push(w + last + 'ed', w + last + 'ing', w + last + 'er', w + last + 'est');
-    } else if (/[^aeiou][aeiou][bdgklmnprt]$/.test(w)) { // admit → admitted, begin → beginning
+    } else if (/[^aeiou][aeiou][bdgklmnprt]$/.test(v)) { // admit → admitted, begin → beginning
       f.push(w + last + 'ed', w + last + 'ing');
     }
-    if (/ic$/.test(w)) f.push(w + 'ally'); // basic → basically
+    if (/ic$/.test(w)) f.push(w + 'ally', w + 'ked', w + 'king'); // basically, panicked, panicking
+    if (/ll$/.test(w)) f.push(w + 'y'); // full → fully
     return f.filter(function (x, i) { return f.indexOf(x) === i; });
   }
 
@@ -735,45 +749,198 @@
     return escapeRe(s).replace(/['’]/g, '[\'’]');
   }
 
+  // Accents removed (café → cafe), so a word and a sentence match with or without them.
+  function foldAccents(s) {
+    const t = str(s);
+    return t.normalize ? t.normalize('NFD').replace(COMBINING_RE, '') : t;
+  }
+
+  // The headword's alternatives: "color / colour", "be enthusiastic about = be passionate about"
+  // (a "=" between spaces only: "src=x" is not two alternatives).
+  const ALTERNATIVES_RE = /[\/;,，；、＝≈]|\s=\s/;
+  // A grammar pattern from "+" on (with a lone S / N / V in front of it): "look forward to + V-ing", "S + V".
+  const PATTERN_TAIL_RE = /(?:\s[NVS])?\s*[+＋][\s\S]*$/;
+  // A word or two in round brackets: "cast (wooden) blocks", "set out (from)", "the way (that)".
+  const BRACKET_WORDS_RE = /(^|\s)\(\s*([A-Za-z][A-Za-z'’\- ]*?)\s*\)(?=\s|$)/g;
+  const BRACKETS_RE = /\([^)]*\)|（[^）]*）|\[[^\]]*\]/g;
+  const ELLIPSIS_RE = /…|⋯|\.{2,}/g;
+
+  // A stand-in for "any word(s)" at token i of raw (the whole phrase, split at spaces).
+  function isPlaceholder(raw, i, key) {
+    const t = raw[i];
+    if (key === '…' || PLACEHOLDERS.has(key) || /^v-?ing$/.test(key)) return true;
+    // A and B only as a pair ("designate A as B", not "Plan B"); N / V / S after "to" ("be looking to V").
+    if ((t === 'A' || t === 'B') && raw.indexOf('A') !== -1 && raw.indexOf('B') !== -1) return true;
+    return /^[NVS]$/.test(t) && i > 0 && raw[i - 1].toLowerCase() === 'to';
+  }
+
   /**
-   * A global, case-insensitive RegExp that finds the headword in an example sentence, or null when
-   * the word has fewer than 2 letters. The word may be inflected (wordForms); in a phrase only the
-   * first word is ("giving up", not "gave up"), the rest must follow literally. Bracketed parts,
-   * alternatives after / ; , and placeholders like sth / sb / one's are left out.
-   * Group 1 is the character in front of the match ('' at the start: no lookbehind before
-   * iOS 16.4), group 2 the headword, which starts at m.index + m[1].length. A match never starts
-   * or ends inside another word ("cat" is not found in "category").
+   * The parts of the headword that the sentence must contain, in order: [{ text } | { any }], each
+   * maybe { opt: true } (may be left out). text is lower-case and without accents; any is a regex
+   * for a possessive / reflexive. null when fewer than 2 letters are left.
+   *   - brackets: "(word)" may be left out, other brackets go ("(v.)", "（放棄）", "[vt.]")
+   *   - only the first alternative ("/ ; , = ≈"); a pattern after "+" goes
+   *   - the phrase ends at a stand-in: "remind sb of sth" → remind, "not only A but also B" → not only
+   *   - "be + adj. + prep." without be: "be aware of" → aware of ("are well aware of", "She's aware of")
    */
-  function headwordRegex(word) {
-    let w = str(word);
-    if (w.normalize) w = w.normalize('NFC'); // é as one character
-    w = w.toLowerCase()
-      .replace(/\([^)]*\)|（[^）]*）|\[[^\]]*\]/g, ' ')
-      .split(/[\/;,，；、]/)[0];
-    const bare = w.replace(PLACEHOLDER_RE, ' ');
-    if (bare.replace(NOT_LETTER_RE, '')) w = bare; // the word "someone" itself stays
-    w = w
-      .replace(NOT_WORD_CHAR_RE, ' ')
-      .replace(/\s+/g, ' ')
-      .trim();
-    if (w.replace(NOT_LETTER_RE, '').length < 2) return null;
-    const parts = w.split(' ');
-    const first = wordForms(parts[0]).sort(function (a, b) { return b.length - a.length; }).map(literal);
-    const rest = parts.slice(1).map(literal).join('\\s+');
-    const core = '(?:' + first.join('|') + ')' + (rest ? '\\s+' + rest : '');
+  function headwordTokens(word) {
+    const w = foldAccents(word).replace(BRACKET_WORDS_RE, function (m, pre, inner) {
+      return pre + inner.trim().split(/\s+/).map(function (x) { return OPT_MARK + x; }).join(' ');
+    })
+      .replace(BRACKETS_RE, ' ')
+      .replace(PATTERN_TAIL_RE, '')
+      .split(ALTERNATIVES_RE)[0]
+      .replace(ELLIPSIS_RE, ' … ');
+    const raw = w.split(/\s+/).filter(Boolean);
+    const out = [];
+    let letters = 0;
+    for (let i = 0; i < raw.length; i++) {
+      let t = raw[i];
+      const opt = t.charAt(0) === OPT_MARK;
+      if (opt) t = t.slice(1);
+      const key = t.toLowerCase().replace(/’/g, "'").replace(/\.$/, '');
+      if (isPlaceholder(raw, i, key)) {
+        if (opt || (!out.length && !SOFT_PLACEHOLDERS.has(key))) continue; // "(sb)", "sb's cup of tea"
+        if (!SOFT_PLACEHOLDERS.has(key) || letters >= 3) break;
+      }
+      if (key === "one's") { out.push({ any: POSSESSIVE, opt: opt }); continue; }
+      if (key === 'oneself') { out.push({ any: REFLEXIVE, opt: opt }); continue; }
+      // "a.b" is two words; Chinese and other marks are left out.
+      t.toLowerCase().split(NOT_WORD_CHAR_RE).forEach(function (x) {
+        if (!HAS_WORD_CHAR_RE.test(x)) return;
+        out.push({ text: x, opt: opt });
+        letters += x.replace(NOT_LETTER_RE, '').length;
+      });
+    }
+    while (out.length && (out[0].opt || out[0].any)) out.shift(); // the first part is always there
+    if (out.length > 1 && out[0].text === 'be' && out[1].text && !out[1].opt) out.shift();
+    const total = out.reduce(function (n, x) { return n + (x.text ? x.text.replace(NOT_LETTER_RE, '').length : 0); }, 0);
+    return total >= 2 ? out : null;
+  }
+
+  // The last word of a phrase may be plural: "role models", "fairy tales", "tourist attractions".
+  function pluralOf(text) {
+    return /[^aeiou]y$/.test(text) ? literal(text.slice(0, -1)) + '(?:y|ies)' : literal(text) + '(?:e?s)?';
+  }
+
+  // { re, first }: the RegExp of headwordRegex and the first word of the headword.
+  function headwordPattern(word) {
+    const tokens = headwordTokens(word);
+    if (!tokens) return null;
+    const first = tokens[0].text;
+    const forms = wordForms(first).sort(function (a, b) { return b.length - a.length; }).map(literal);
+    let rest = '';
+    for (let i = 1; i < tokens.length; i++) {
+      const t = tokens[i];
+      let part = t.any || literal(t.text);
+      if (i === tokens.length - 1 && t.text && !t.opt && t.text.length >= 3) part = pluralOf(t.text);
+      rest += t.opt ? '(?:\\s+' + part + ')?' : '\\s+' + part;
+    }
+    const source = '(^|[^' + WORD_CHARS + '])((' + forms.join('|') + ')' + rest + ')(?![' + WORD_CHARS + '])';
     try {
-      return new RegExp('(^|[^' + LETTERS + '])(' + core + ')(?![' + LETTERS + '])', 'gi');
+      return { re: new RegExp(source, 'gi'), first: first };
     } catch (e) {
       return null;
     }
   }
 
-  // The first occurrence of the headword in sentence: { index, text } (the exact substring) or null.
-  function findHeadword(sentence, word) {
+  /**
+   * A global, case-insensitive RegExp that finds the headword in an accent-free sentence
+   * (foldAccents; findHeadwords does that), or null when fewer than 2 letters are left (see
+   * headwordTokens). The first word may be inflected (wordForms), the rest follows literally
+   * ("giving up", not "gave up"), except that the last word of a phrase may be plural.
+   * Group 1 is the character in front of the match ('' at the start: no lookbehind before
+   * iOS 16.4), group 2 the headword, which starts at m.index + m[1].length, group 3 its first word.
+   * A match never starts or ends inside another word ("cat" is not found in "category").
+   */
+  function headwordRegex(word) {
+    const p = headwordPattern(word);
+    return p ? p.re : null;
+  }
+
+  // sentence without accents, and map[i] = the index in sentence of character i (null: the same).
+  function foldMap(s) {
+    if (!/[^\x00-\x7f]/.test(s) || !s.normalize) return { text: s, map: null };
+    let text = '';
+    const map = [];
+    for (let i = 0; i < s.length; i++) {
+      const f = s.charAt(i).normalize('NFD').replace(COMBINING_RE, '');
+      for (let k = 0; k < f.length; k++) {
+        text += f.charAt(k);
+        map.push(i);
+      }
+    }
+    map.push(s.length);
+    return { text: text, map: map };
+  }
+
+  /**
+   * Every occurrence of the headword in sentence, in order: [{ index, text, tier }] with text the
+   * exact substring (accents do not matter: café = cafe). tier: 0 = the word itself, 1 = -s / -ed /
+   * -ing, 2 = another form (-er, -est, -ly …), which may also be an unrelated word ("letter" for let).
+   */
+  function findHeadwords(sentence, word) {
     const s = str(sentence);
-    const re = s ? headwordRegex(word) : null;
-    const m = re ? re.exec(s) : null;
-    return m ? { index: m.index + m[1].length, text: m[2] } : null;
+    const p = s ? headwordPattern(word) : null;
+    if (!p) return [];
+    const f = foldMap(s);
+    const at = function (k) { return f.map ? f.map[k] : k; };
+    const out = [];
+    let m;
+    while ((m = p.re.exec(f.text)) !== null) {
+      const start = m.index + m[1].length;
+      if (m[2]) {
+        const a = at(start);
+        const head = m[3].toLowerCase();
+        out.push({ index: a, text: s.slice(a, at(start + m[2].length)),
+          tier: head === p.first ? 0 : /(?:s|d|ing)$/.test(head) ? 1 : 2 });
+      }
+      if (p.re.lastIndex <= m.index) p.re.lastIndex = m.index + 1;
+    }
+    return out;
+  }
+
+  // The occurrence a question asks: the word itself before -s / -ed / -ing before other forms, else the first.
+  function bestHit(hits) {
+    let best = null;
+    hits.forEach(function (x) { if (!best || x.tier < best.tier) best = x; });
+    return best;
+  }
+
+  // The headword in sentence: { index, text } (the exact substring) or null. See findHeadwords / bestHit.
+  function findHeadword(sentence, word) {
+    const b = bestHit(findHeadwords(sentence, word));
+    return b ? { index: b.index, text: b.text } : null;
+  }
+
+  /**
+   * The headword the way it is read aloud: the first alternative ("color / colour" → color), no
+   * grammar pattern ("+ N / V-ing"), Chinese, brackets or A / B / V standing for words; sb / sth
+   * read as somebody / something, "…" as a pause. Falls back to the word as it is.
+   */
+  function speakableWord(word) {
+    const src = str(word).trim();
+    const words = src
+      .replace(/[（(]([^（）()]*)[)）]/g, function (m, inner) {
+        return /^[A-Za-z][A-Za-z'’\- ]*$/.test(inner.trim()) ? ' ' + inner + ' ' : ' ';
+      })
+      .replace(/\[[^\]]*\]/g, ' ')
+      .replace(PATTERN_TAIL_RE, '')
+      .split(ALTERNATIVES_RE)[0]
+      .replace(/[㐀-鿿豈-﫿]+/g, ' ')
+      .replace(ELLIPSIS_RE, ' , ')
+      .split(/\s+/).filter(Boolean);
+    const out = [];
+    words.forEach(function (t, i) {
+      const key = t.toLowerCase().replace(/’/g, "'").replace(/\.$/, '');
+      if (key === 'sb' || key === 'sth' || key === "sb's" || key === "sth's") {
+        out.push((key.slice(0, 2) === 'sb' ? 'somebody' : 'something') + (key.slice(-2) === "'s" ? "'s" : ''));
+      } else if (key !== '…' && !(isPlaceholder(words, i, key) && !SOFT_PLACEHOLDERS.has(key))) {
+        out.push(t);
+      }
+    });
+    const t = out.join(' ').replace(/\s+,/g, ',').replace(/,+/g, ',').replace(/^[\s,]+|[\s,]+$/g, '');
+    return t || src;
   }
 
   /* ---------------------------------------------------------- spelling quiz */
@@ -796,22 +963,38 @@
   }
 
   /**
-   * The spelling question of a card: its example sentence split around the first occurrence of the
-   * headword — { before, answer, after, masked, hidden } with before + answer + after = example —
-   * or null when there is no example, the word is not in it, or nothing would be hidden.
+   * The spelling question of a card: its example sentence split around the headword (findHeadword)
+   * — { before, answer, after, masked, hidden, beforeMasked, afterMasked } with before + answer +
+   * after = example; beforeMasked / afterMasked are before / after with every other occurrence of the
+   * headword masked too ("Practice makes perfect, so p______e every day.") — or null when there is no
+   * example, the word is not in it, or nothing would be hidden.
    */
   function makeCloze(card) {
     const example = str(card && card.example);
-    const hit = findHeadword(example, card && card.word);
+    const hits = findHeadwords(example, card && card.word);
+    const hit = bestHit(hits);
     if (!hit) return null;
     const mask = maskWord(hit.text);
     if (!mask.hidden) return null;
+    const end = hit.index + hit.text.length;
+    const maskedPart = function (from, to) {
+      let out = '';
+      let pos = from;
+      hits.forEach(function (x) {
+        if (x === hit || x.index < from || x.index + x.text.length > to) return;
+        out += example.slice(pos, x.index) + maskWord(x.text).masked;
+        pos = x.index + x.text.length;
+      });
+      return out + example.slice(pos, to);
+    };
     return {
       before: example.slice(0, hit.index),
       answer: hit.text,
-      after: example.slice(hit.index + hit.text.length),
+      after: example.slice(end),
       masked: mask.masked,
       hidden: mask.hidden,
+      beforeMasked: maskedPart(0, hit.index),
+      afterMasked: maskedPart(end, example.length),
     };
   }
 
@@ -824,18 +1007,60 @@
   }
 
   // True when input spells answer — or, for a one-word answer of 3+ letters, when input is only
-  // the hidden letters (answer "abandoned", input "bandone").
-  function checkSpelling(input, answer) {
+  // the hidden letters (answer "abandoned", input "bandone"). With the card's word: a be-phrase
+  // ("be accustomed to") only asks the rest, so "be accustomed to" counts for "accustomed to" too.
+  function checkSpelling(input, answer, word) {
     const a = spellingKey(answer);
     const t = spellingKey(input);
     if (!t || !a) return false;
     if (t === a) return true;
+    if (/^be\s/i.test(str(word).trim()) && t === 'be ' + a) return true;
     return a.length >= 3 && ONE_RUN_RE.test(a) && t === a.slice(1, -1);
+  }
+
+  // A wrong answer that is the card's word in another form than the sentence needs ("perceive"
+  // for "perceived"): the word was known, only the form was not.
+  function isOtherForm(input, word, answer) {
+    const t = spellingKey(input);
+    if (!t || checkSpelling(input, answer, word)) return false;
+    const hits = findHeadwords(str(input).trim(), word);
+    return hits.length === 1 && spellingKey(hits[0].text) === t;
   }
 
   /* ------------------------------------------------------------ choice quiz */
 
   const POS_LEAD_RE = new RegExp('^[(（]?\\s*(' + POS_NAMES + ')\\.', 'i');
+  const POS_KEY_RE = new RegExp('^\\s*' + POS_UNIT + '\\s*', 'i');
+  // A bracketed part of speech: "(n.)", "(adj.)", "(v./n.)".
+  const POS_GROUP_RE = new RegExp('^\\s*' + POS + '(?:\\s*[/,、&]\\s*' + POS + ')*\\s*$', 'i');
+  const NOTE_GROUP_RE = /\s*[（(]([^（）()]*)[)）]/g;
+  // From an arrow or "=" with English after it to the end of the line: "→ Lantern Festival 元宵節",
+  // "← generous (adj.)", "＝tolerate" (but not "src=x" or "≈ 近年來").
+  const NOTE_TAIL_RE = /\s*(?:[→←⇒≈＝]|\s=\s)\s*[(（「“"']?\s*[A-Za-z][\s\S]*$/;
+  const LATIN_RE = /[A-Za-z]/;
+
+  /**
+   * A meaning as a quiz shows it (choice options, the 中文 flashcard front, the spelling hint):
+   * without notes that would give the English away — brackets with English in them ("（kneel down）",
+   * "（+ in）"; a part of speech like "(n.)" stays) and arrow notes ("n. 燈籠 → Lantern Festival 元宵節"
+   * → "n. 燈籠"). Lines that were only such a note go. A meaning without Chinese (an English
+   * definition), or one that would lose all of its Chinese, stays as it is.
+   */
+  function quizMeaning(meaning) {
+    const src = str(meaning);
+    if (!CJK_RE.test(src)) return src;
+    const lines = [];
+    src.split(/\r\n|\r|\n/).forEach(function (line) {
+      const c = line
+        .replace(NOTE_GROUP_RE, function (m, inner) { return LATIN_RE.test(inner) && !POS_GROUP_RE.test(inner) ? '' : m; })
+        .replace(NOTE_TAIL_RE, '')
+        .replace(/[\s,，、;；:：\/／]+$/, '')
+        .trim();
+      if (CJK_RE.test(c) || (c && c === line.trim())) lines.push(c);
+    });
+    const out = lines.join('\n');
+    return CJK_RE.test(out) ? out : src;
+  }
 
   // The part of speech a meaning starts with, lower-cased ("v. 放棄" → 'v.', "(Adj.) 快樂的" → 'adj.'), or ''.
   function posOf(meaning) {
@@ -843,41 +1068,52 @@
     return m ? m[1].toLowerCase() + '.' : '';
   }
 
-  // Meanings with the same key are the same option: line breaks read as '；', case and spaces ignored.
+  // Meanings with the same key are the same option: line breaks read as '；'; a leading part of
+  // speech, spaces, case and punctuation at the end do not count ("v. 放棄" = "(v.)放棄。" = "放棄").
   function meaningKey(meaning) {
-    return str(meaning).trim().replace(/\s*\n\s*/g, '；').replace(/\s+/g, ' ').toLowerCase();
+    return str(meaning).trim().replace(/\s*\n\s*/g, '；').replace(POS_KEY_RE, '').replace(/\s+/g, '')
+      .replace(/[.,;:!?。，；：！？、]+$/, '').toLowerCase();
   }
 
-  // Tests a pool card as a wrong option for card: returns its meaningKey, or '' when it is the card
-  // itself, the same word (e.g. in another deck), or a blank / the same meaning.
+  // The senses of a quiz meaning: "v. 接近；靠近；n. 方法" → ['接近', '靠近', '方法'].
+  function sensesOf(shown) {
+    return shown.split(/[\n；;、,，\/／]/).map(meaningKey).filter(Boolean);
+  }
+
+  // Tests a pool card as a wrong option for card: returns the key of its quiz meaning, or '' when it
+  // is the card itself, the same word (e.g. in another deck), or a blank / the same meaning.
   function distractorTest(card) {
     const id = card && card.id;
     const word = normalizeWord(card && card.word);
-    const key = meaningKey(card && card.meaning);
+    const key = meaningKey(quizMeaning(card && card.meaning));
     return function (c) {
       if (!c || c === card || (id != null && c.id === id)) return '';
-      const k = meaningKey(c.meaning);
+      const k = meaningKey(quizMeaning(c.meaning));
       if (!k || k === key || (word && normalizeWord(c.word) === word)) return '';
       return k;
     };
   }
 
   /**
-   * Options for a multiple-choice question: card.meaning plus up to n - 1 (default 3) wrong meanings
-   * from pool (cards), all distinct by meaningKey. Meanings with the card's part of speech come
-   * first, the rest are random. Returns { options (shuffled), answerIndex } — fewer than n options
-   * when the pool lacks distinct meanings; the option strings are always distinct.
+   * Options for a multiple-choice question: the card's quizMeaning plus up to n - 1 (default 3)
+   * wrong ones from pool (cards), all distinct by meaningKey. Meanings with the card's part of
+   * speech come first, the rest are random; a meaning that shares a sense with the answer
+   * ("奉獻、投入" for "虔誠、奉獻") would be right too, so it is only used when nothing else is left.
+   * Returns { options (shuffled), answerIndex } — fewer than n options when the pool lacks distinct
+   * meanings; the option strings are always distinct.
    */
   function pickChoices(card, pool, rng, n) {
     const r = rngOf(rng);
     const size = n == null ? 4 : Math.max(1, Math.floor(num(n, 4)));
-    const correct = str(card && card.meaning);
+    const correct = quizMeaning(card && card.meaning);
     const pos = posOf(correct);
+    const senses = new Set(sensesOf(correct));
     const test = distractorTest(card);
     const list = Array.isArray(pool) ? pool.slice() : [];
     const used = new Set();
     const same = [];
     const other = [];
+    const close = [];
     // Draw the pool in random order (Fisher–Yates, one step at a time) until enough are found.
     for (let i = 0; i < list.length && same.length < size - 1; i++) {
       const j = i + randomIndex(r, list.length - i);
@@ -887,9 +1123,11 @@
       const k = test(c);
       if (!k || used.has(k)) continue;
       used.add(k);
-      (posOf(c.meaning) === pos ? same : other).push(str(c.meaning));
+      const shown = quizMeaning(c.meaning);
+      if (sensesOf(shown).some(function (s) { return senses.has(s); })) close.push(shown);
+      else (posOf(shown) === pos ? same : other).push(shown);
     }
-    const wrong = same.concat(other).slice(0, size - 1);
+    const wrong = same.concat(other, close).slice(0, size - 1);
     const order = shuffle(wrong.map(function (m, i) { return i + 1; }).concat(0), r);
     return {
       options: order.map(function (i) { return i ? wrong[i - 1] : correct; }),
@@ -933,12 +1171,36 @@
     };
   }
 
+  // FNV-1a hash of a string (uint32).
+  function hashString(s) {
+    let h = 0x811c9dc5;
+    for (let i = 0; i < s.length; i++) {
+      h ^= s.charCodeAt(i);
+      h = Math.imul(h, 0x01000193);
+    }
+    return h >>> 0;
+  }
+
+  /**
+   * cards (a copy) in a random order given by seed and each card's id alone: adding or deleting a
+   * card leaves the others in the same order (the flashcard shuffle keeps its place). Equal keys
+   * keep the input order.
+   */
+  function seededOrder(cards, seed) {
+    const s = Number(seed) >>> 0;
+    const list = Array.isArray(cards) ? cards.filter(Boolean) : [];
+    return list.map(function (c, i) {
+      return { c: c, i: i, k: seededRng((s ^ hashString(str(c.id))) >>> 0)() };
+    }).sort(function (a, b) { return a.k - b.k || a.i - b.i; }).map(function (x) { return x.c; });
+  }
+
   /**
    * The questions of a quiz: count cards (0 = all) in random order, skipping cards that cannot
    * make a question (so there are fewer only when too few cards can).
    *   'choice' → { cardId, mode, word, phonetic, options, answerIndex }: pickChoices(card, pool || cards);
    *              a card needs at least one other distinct meaning (2+ options).
-   *   'spell'  → { cardId, mode, cloze, hint }: cloze = makeCloze(card), hint = exampleZh or else meaning.
+   *   'spell'  → { cardId, mode, cloze, hint }: cloze = makeCloze(card), hint = exampleZh or else
+   *              the quizMeaning.
    */
   function buildQuiz(cards, mode, count, rng, pool) {
     if (mode !== 'choice' && mode !== 'spell') throw new RangeError("mode must be 'choice' or 'spell'");
@@ -957,7 +1219,7 @@
           options: pick.options, answerIndex: pick.answerIndex });
       } else {
         const cloze = makeCloze(c);
-        if (cloze) out.push({ cardId: c.id, mode: mode, cloze: cloze, hint: str(c.exampleZh).trim() || str(c.meaning) });
+        if (cloze) out.push({ cardId: c.id, mode: mode, cloze: cloze, hint: str(c.exampleZh).trim() || quizMeaning(c.meaning) });
       }
     }
     return out;
@@ -979,7 +1241,7 @@
   /* ----------------------------------------------------------------- export */
 
   const VC = {
-    version: '2.0', // must equal APP_VERSION in app.js (detects a stale cached core.js)
+    version: '2.1', // must equal APP_VERSION in app.js and VERSION in sw.js (detects a stale cached core.js)
     DEFAULT_DECK_SETTINGS: DEFAULT_DECK_SETTINGS,
     parseDeckText: parseDeckText,
     serializeDeck: serializeDeck,
@@ -987,15 +1249,21 @@
     normalizeWord: normalizeWord,
     newCard: newCard,
     wordForms: wordForms,
+    foldAccents: foldAccents,
     headwordRegex: headwordRegex,
+    findHeadwords: findHeadwords,
     findHeadword: findHeadword,
+    speakableWord: speakableWord,
     maskWord: maskWord,
     makeCloze: makeCloze,
     checkSpelling: checkSpelling,
+    isOtherForm: isOtherForm,
+    quizMeaning: quizMeaning,
     posOf: posOf,
     meaningKey: meaningKey,
     shuffle: shuffle,
     seededRng: seededRng,
+    seededOrder: seededOrder,
     pickChoices: pickChoices,
     buildQuiz: buildQuiz,
     quizEligible: quizEligible,

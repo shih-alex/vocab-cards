@@ -83,6 +83,23 @@
     'write | v. 寫',
   ].join('\n');
 
+  // Like the L9 lesson file: notes with English inside the meanings, no example sentences.
+  const NOTES = [
+    '#deck: L9 Mazu Mania 單字',
+    'pilgrimage | n. 朝聖、進香 → pilgrim (n.) 朝聖者',
+    'lantern | n. 燈籠 → Lantern Festival 元宵節',
+    'generosity | n. 慷慨 ← generous (adj.)',
+    'devotion | n. 虔誠、奉獻 → be devoted to + N / V-ing',
+    'sedan chair | n. 轎子',
+    'kneel | v. 跪下（kneel down）',
+    'participate | v. 參加（+ in）→ participant (n.) 參加者',
+    'heritage | n. 遺產 → cultural heritage 文化遺產',
+    'throng | n. 人群 → throngs of 大批的',
+    'goddess | n. 女神',
+    'temple | n. 廟宇',
+    'statue | n. 雕像',
+  ].join('\n');
+
   const LONG = '#deck: 長內容\nput up with | /pʊt ʌp wɪð/ | phr. 忍受；容忍（不愉快的人或事）\\n＝tolerate, endure, stand | ' +
     'I can\'t put up with the noise from my neighbors any longer; it keeps me awake every night. | ' +
     '我再也受不了鄰居的噪音了，它讓我每晚都睡不著。 | 常見考法：put up with + N/V-ing（不可接原形動詞）。' +
@@ -229,7 +246,7 @@
     return S().cards.find((c) => c.id === p.getAttribute('data-card-id'));
   };
   const correctIndex = () => $$('.opt .opt-text').map((el) => el.textContent)
-    .indexOf(quizCard().meaning.replace(/\s*\n\s*/g, '；'));
+    .indexOf(W().VC.quizMeaning(quizCard().meaning).replace(/\s*\n\s*/g, '；'));
 
   /** A right answer moves on after 900 ms; keep it on screen for the picture. */
   function holdAutoAdvance() {
@@ -309,6 +326,19 @@
       W().VCApp.importText(NO_EXAMPLES, {});
       await openHub('不規則動詞');
     },
+    'hub-examples': async () => {
+      W().VCApp.importText(NOTES, {});
+      await openHub('L9 Mazu Mania 單字');
+    },
+    'examples-sheet': async () => {
+      W().VCApp.importText(NOTES, {});
+      await openHub('L9 Mazu Mania 單字');
+      await openSheet('add-examples');
+    },
+    'quiz-choice-notes': async () => {
+      W().VCApp.importText(NOTES, {});
+      await openQuiz('L9 Mazu Mania 單字', 'choice');
+    },
     'hub-empty': async () => {
       seedRich();
       const s = S();
@@ -321,6 +351,7 @@
     'flash-front': async () => { seedRich(); await openCards(SAMPLE()); },
     'flash-back': async () => { seedRich(); await openCards(SAMPLE()); click('flip'); },
     'flash-back-dark': async () => { seedRich('dark'); await openCards(SAMPLE()); click('flip'); },
+    'flash-shuffled': async () => { seedRich(); await openCards(SAMPLE()); click('shuffle'); },
     'flash-zh2en': async () => {
       seedRich();
       const s = S();
@@ -474,6 +505,8 @@
 
   /* ------------------------------------------------------------------ runner */
   async function run() {
+    // Never next to the app's real data: only on this computer (see e2e.html).
+    if (!/^(localhost|127\.0\.0\.1|\[::1\])$/.test(location.hostname)) throw new Error('only runs on localhost');
     const scenario = SCENARIOS[NAME];
     if (!scenario) throw new Error('unknown scenario: ' + NAME);
     frame = document.createElement('iframe');
