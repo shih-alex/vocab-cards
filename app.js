@@ -15,47 +15,84 @@
  *   render()            re-render the current route
  *   setClock(fn)        fn() -> ms; replaces Date.now for all app logic (pass null to reset)
  *   importText(text, opts) -> { added, updated, skipped, errors, deckIds, failed? }
- *       opts: { deckName?: string, deckId?: string, dupMode?: 'skip' | 'update', fileName?: string }
+ *       opts: { deckName?: string, deckId?: string, dupMode?: 'skip' | 'update', fileName?: string,
+ *               folderId?: string }
  *       Cards outside #deck sections go to deckId (existing deck) or the deck named deckName
  *       (existing deck with that name — case/space-insensitive — else a new one; default 「我的單字」).
- *       fileName ending in .csv parses the text as CSV. failed: true = storage full, nothing imported.
+ *       New decks go into the folder folderId, unless the text says "#folder: 名稱" (that folder,
+ *       made when there is none). fileName ending in .csv parses the text as CSV.
+ *       failed: true = storage full, nothing imported.
  *   setPlatform(obj)    override platform detection, e.g. { ios: true, standalone: false } (tests,
  *                       screenshots); pass null to go back to the real values. Re-renders.
  *   setRandom(fn)       fn() -> number in [0, 1); replaces Math.random for picking quiz questions and
  *                       answer order and for the flashcard shuffle seed (pass null to reset)
  * Storage key: localStorage 'vocabcards.v1'; ?sk=<name> in the URL (or window.VC_STORAGE_KEY, set
  * before app.js loads — tests that run the app without a URL) uses another key.
+ * State (version 3): { version, folders: [{ id, name, created }], decks: [{ id, name, created,
+ * folderId (null = no folder), settings, flash }], cards, seq, quizHistory: [{ mode, deckIds, score,
+ * total, at }] (newest first, max 20; finished quizzes, not 重測 rounds), prefs: { …, quizSetup:
+ * { mode: 'choice' | 'spell', deckIds: [ids] | null (= every deck), count: 10 | 20 | 50 | 0 (= all) } } }.
+ * Version 1 / 2 data and backups are migrated when loaded / restored.
  *
- * Routes: #/  #/deck/<deckId>  #/deck/<deckId>/words  #/cards/<deckId>  #/quiz/<deckId>/choice
- *         #/quiz/<deckId>/spell  #/import  #/settings          (v1 links #/study/<deckId> open the deck)
- * Root screen element: <main class="screen" data-screen="home|deck|browse|cards|quiz|import|settings">
+ * Routes: #/ (牌組)  #/folder/<folderId>  #/deck/<deckId>  #/deck/<deckId>/words  #/cards/<deckId>
+ *         #/quiz (測驗)  #/quiz/run  #/import  #/settings
+ *         #/quiz?deck=<id> | ?folder=<id> (&mode=choice|spell) choose exactly that deck / the decks of
+ *         that folder on the quiz page, then show as #/quiz; so do the v2 links #/quiz/<deckId>/<mode>.
+ *         #/quiz/run without a quiz going on (e.g. after a reload) shows #/quiz. v1 #/study/<deckId> = the deck.
+ * Root screen element: <main class="screen"
+ *         data-screen="home|folder|deck|browse|cards|quiz-setup|quiz|import|settings"> (quiz = a quiz running)
+ * Tab bar <nav class="tabbar"> (outside #app; body.has-tabbar while shown) on home, folder and
+ * quiz-setup only: tab-decks, tab-quiz (the current one has aria-current="page"). Tabs replace
+ * rather than add history: back from #/quiz goes to #/.
  *
  * data-action (all are <button>s unless noted):
- *   Home      open-settings, open-import (bottom primary), deck-open (data-deck-id; second line
- *             .deck-total 「共 N 字」 and .deck-scores 「選擇 8/10 · 拼字 6/10」 once a quiz was finished),
- *             deck-menu (⋯, data-deck-id), new-deck, empty-import-file, empty-paste, load-sample,
- *             empty-claude, empty-restore; iPhone Safari hint on the empty state: .empty-ios
+ *   Home      open-settings, open-import (bottom primary), new-deck, new-folder (prompt for a name);
+ *             folders first (section 「資料夾」): folder-open (data-folder-id; .folder-meta
+ *             「3 個牌組 · 98 字」), folder-menu (⋯, data-folder-id); then the decks outside any folder:
+ *             deck-open (data-deck-id; second line .deck-total 「共 N 字」), deck-menu (⋯, data-deck-id);
+ *             no deck and no folder: empty-import-file, empty-paste, load-sample, empty-claude,
+ *             empty-restore; iPhone Safari hint on the empty state: .empty-ios
  *             notice card #home-notice[data-notice="corrupt|newer|corrupt-copy|ios|backup"]:
  *               notice-backup (export now), notice-dismiss, download-raw, reset-corrupt, reload-app,
  *               delete-corrupt-copy
- *   Deck menu sheet-browse, sheet-settings, sheet-export, sheet-delete
+ *   Deck menu sheet-browse, sheet-settings, deck-move (移動到資料夾), sheet-export, sheet-delete
+ *   Move sheet move-to-folder (data-folder-id = a folder id or "none" = 不放資料夾; the current one
+ *             has aria-pressed="true"), move-new-folder (prompt, make the folder, move the deck there)
+ *   Folder    back, folder-menu (data-folder-id), #folder-count 「3 個牌組 · 98 字」, deck-open /
+ *             deck-menu rows, new-deck (made in this folder), bottom: folder-import (匯入單字 with
+ *             this folder chosen), folder-quiz (測驗這個資料夾, when it has words);
+ *             empty folder (#folder-empty): folder-import, new-deck
+ *   Folder menu folder-rename (prompt), folder-quiz (when it has words), folder-delete (confirm; its
+ *             decks move out of the folder, no word is deleted)
  *   Deck hub  back, deck-settings, word count #hub-count 「共 N 字」;
- *             tiles hub-cards, hub-choice, hub-spell (.tile; .tile-meta on the right: 「看到第 12 張」,
- *             「上次 8/10」, 「可出 32 題」, 「繼續第 4 題」 for a quiz left unfinished (the tile continues it);
- *             a tile that cannot make any question is disabled and says why in .tile-desc);
- *             add-examples (請 Claude 補例句, when half the words or more have no example); questions per
- *             quiz quiz-count-10, quiz-count-20, quiz-count-all (aria-pressed; only the counts that fit
- *             the deck are offered; a deck of 10 words or fewer shows the text #quiz-count-fixed
- *             「全部 (8)」 instead); hub-words (瀏覽與編輯單字);
- *             empty deck (#hub-empty): import-to-deck, add-card
+ *             tiles hub-cards (.tile-meta 「看到第 12 張」), hub-quiz (測驗: the quiz page with this deck
+ *             chosen; disabled, saying why in .tile-desc, when no question can be made);
+ *             add-examples (請 Claude 補例句, when half the words or more have no example); hub-words
+ *             (瀏覽與編輯單字); empty deck (#hub-empty): import-to-deck, add-card
  *   Examples sheet (add-examples): copy-examples-prompt (rules + the deck as a text file, for Claude),
  *             paste-examples (the import screen for this deck, 更新內容 selected)
  *   Cards     back, shuffle (aria-pressed), edit-card, card (the tappable flashcard #flash-card
  *             [data-card-id], .flipped while its back shows), speak, prev, flip (aria-pressed), next;
  *             progress text #flash-progress 「12 / 40」; swipe left/right on the card = next/prev;
- *             end view #flash-end: flash-restart, flash-to-choice, flash-to-spell, flash-home, and
- *             .done-note + add-examples when there are no spelling questions
- *   Quiz      quiz-quit (✕), counter #quiz-count 「3 / 10」, speak; feedback #quiz-feedback (.ok / .bad);
+ *             end view #flash-end: flash-restart, flash-to-choice, flash-to-spell (start a quiz of this
+ *             deck right away; it becomes the quiz page's setup), flash-home, and .done-note +
+ *             add-examples when there are no spelling questions
+ *   Quiz page (data-screen="quiz-setup") quiz-resume (「繼續第 N 題」 .tile-meta 「共 10 題」, .tile-desc
+ *             「選擇題 · Unit 3」; while a quiz left half-way has answers); 題型 quiz-mode-choice /
+ *             quiz-mode-spell (aria-pressed); 選擇牌組 (#quiz-decks):
+ *             quiz-all / quiz-none (one link: 全選, or 全部取消 when every deck is chosen), per folder
+ *             quiz-folder (data-folder-id; role=checkbox, aria-checked true | false | mixed) and
+ *             quiz-folder-toggle (open / close, aria-expanded), deck rows quiz-deck (data-deck-id;
+ *             role=checkbox, aria-checked; .pick-meta 「40 字」, for 拼字題 「40 字 · 可出 12 題」 or
+ *             「40 字 · 沒有可出的題目」 (.dim)); decks outside a folder under .pick-label 「未分類」 (only when
+ *             there are folders); 題數 quiz-count-10 / -20 / -50 (only those below the questions
+ *             available) / quiz-count-all 「全部 (N)」 (aria-pressed; hidden when nothing can be asked);
+ *             summary #quiz-summary 「已選 3 個牌組 · 可出 98 題」 or the reason nothing can be asked
+ *             (.warn); quiz-start (開始測驗, disabled then); 最近測驗 #quiz-recent rows .recent-row
+ *             (text 「選擇題 · 3 個牌組 · 8/10 · 10/16」; one deck: its name); no deck at all:
+ *             #quiz-no-decks with open-import
+ *   Quiz      (#/quiz/run, data-screen="quiz") quiz-quit (✕), counter #quiz-count 「3 / 10」, speak;
+ *             feedback #quiz-feedback (.ok / .bad);
  *             quiz-next (下一題, 「看結果」 on the last question); the question (.quiz-prompt for choice,
  *             .quiz-card for spell) has data-card-id of the card it asks
  *             choice: options option-0 .. option-3 (.opt; once answered the right one has .correct, a
@@ -66,22 +103,27 @@
  *               (不會，看答案) in .quiz-card-foot, input #spell-input, spell-submit; a wrong answer shows
  *               .fb-meaning in the card and .fb-form when only the form was wrong
  *             results #quiz-results: #quiz-score 「8 / 10」, wrong words .wrong-list (rows .wl-row
- *               [data-card-id]), retry-wrong (only when something was wrong), quiz-again, quiz-home;
- *             no question possible: #quiz-empty with quiz-home (and add-examples)
+ *               [data-card-id]; .wr-deck = the deck's name when several decks were tested),
+ *               retry-wrong (only when something was wrong), quiz-again (再測一次: same decks, kind
+ *               and count, a new random set), quiz-home (回到測驗)
  *   Browse    back, deck-settings, add-card, card-row (data-card-id; pill .p-wrong 「錯 N」 when the word
- *             was answered wrong in a quiz, .p-nospell 「不考拼字」 when its example lacks the word),
- *             show-more, search input #browse-search, clear-search; empty deck: .list-empty with
- *             import-to-deck
+ *             was answered wrong in a quiz, .p-nospell 「片語不考拼字」 for a phrase (VC.isPhrase) or
+ *             「不考拼字」 when its example lacks the word), show-more, search input #browse-search,
+ *             clear-search; empty deck: .list-empty with import-to-deck
  *   Card sheet inputs #f-word #f-phonetic #f-meaning #f-example #f-exampleZh #f-note; under the
- *             example #f-example-hint (what the spelling quiz asks, .warn when the word is not found);
- *             quiz record .sheet-meta 「測驗：答對 x・答錯 y」 (when there is one);
- *             card-save, card-save-next (new cards only), card-delete
- *   Deck settings sheet input #ds-name; 字卡正面 dir-en2zh (英文) / dir-zh2en (中文),
- *             ds-save, ds-export, ds-delete
+ *             example #f-example-hint (what the spelling quiz asks, .warn when the word is not found,
+ *             「片語不考拼字…」 for a phrase); quiz record .sheet-meta 「測驗：答對 x・答錯 y」 (when there
+ *             is one); card-save, card-save-next (new cards only), card-delete
+ *   Deck settings sheet input #ds-name; select #ds-folder ('' = 不放資料夾, or a folder id; only when
+ *             there are folders); 字卡正面 dir-en2zh (英文) / dir-zh2en (中文), ds-save, ds-export, ds-delete
  *   Import    back, file input #file-input (inside the dropzone label), remove-file (data-file-id),
  *             textarea #import-text, select #import-target ('new' or a deck id),
- *             deck-name inputs .import-deck-name (data-source-id), dup-skip, dup-update (only when
- *             some words are already in the deck), summary #import-summary (zero counts left out),
+ *             deck-name inputs .import-deck-name (data-source-id), select #import-folder ('' =
+ *             不放資料夾, a folder id, 'new' = the folder being named, 'add' = 新增資料夾… (prompts);
+ *             shown when the import makes a new deck the file does not put in a #folder:, or when
+ *             opened from a folder page), dup-skip, dup-update (only when some words are already in
+ *             the deck), summary #import-summary (zero counts left out), deck list ul.sections (each
+ *             li: .sec-name, .sec-folder when the deck is / will be in a folder, .sec-tag, .sec-num),
  *             import-confirm, copy-claude-rules (.claude-cta), copy-example (in details.help),
  *             show-format-help (shown when nothing can be imported); hints .import-note
  *   Settings  back, theme-auto, theme-light, theme-dark, #pref-autospeak (checkbox),
@@ -94,7 +136,7 @@
   'use strict';
 
   var VC = window.VC;
-  var APP_VERSION = '2.1'; // must equal VC.version in core.js (and VERSION in sw.js)
+  var APP_VERSION = '3.0'; // must equal VC.version in core.js (and VERSION in sw.js)
 
   /* =====================================================================================
    * Small utilities
@@ -165,7 +207,12 @@
     cards: '<rect x="3" y="7" width="13" height="14" rx="2.5"/><path d="M8 3.5h10.5A2.5 2.5 0 0 1 21 6v11"/>',
     choice: '<path d="M11 6h10M11 12h10M11 18h10"/><path d="M3 6l1.6 1.6L7.5 4.7"/><circle cx="5" cy="12.2" r="1.9"/><circle cx="5" cy="18.2" r="1.9"/>',
     spell: '<rect x="2" y="6" width="20" height="13" rx="2.5"/><path d="M6 10h.01M10 10h.01M14 10h.01M18 10h.01M7 15h10"/>',
-    shuffle: '<path d="M16 3h5v5"/><path d="M4 20L21 3"/><path d="M21 16v5h-5"/><path d="M15 15l6 6"/><path d="M4 4l5 5"/>'
+    shuffle: '<path d="M16 3h5v5"/><path d="M4 20L21 3"/><path d="M21 16v5h-5"/><path d="M15 15l6 6"/><path d="M4 4l5 5"/>',
+    folder: '<path d="M3 7.5A2.5 2.5 0 0 1 5.5 5h3.6a2 2 0 0 1 1.6.8l1.1 1.4a2 2 0 0 0 1.6.8h5.1A2.5 2.5 0 0 1 21 10.5v7a2.5 2.5 0 0 1-2.5 2.5h-13A2.5 2.5 0 0 1 3 17.5z"/>',
+    folderPlus: '<path d="M3 7.5A2.5 2.5 0 0 1 5.5 5h3.6a2 2 0 0 1 1.6.8l1.1 1.4a2 2 0 0 0 1.6.8h5.1A2.5 2.5 0 0 1 21 10.5v7a2.5 2.5 0 0 1-2.5 2.5h-13A2.5 2.5 0 0 1 3 17.5z"/><path d="M12 11v6M9 14h6"/>',
+    folderOut: '<path d="M3 7.5A2.5 2.5 0 0 1 5.5 5h3.6a2 2 0 0 1 1.6.8l1.1 1.4a2 2 0 0 0 1.6.8h5.1A2.5 2.5 0 0 1 21 10.5v7a2.5 2.5 0 0 1-2.5 2.5h-13A2.5 2.5 0 0 1 3 17.5z"/><path d="M12 17v-6M9.5 13.5L12 11l2.5 2.5"/>',
+    quiz: '<path d="M8 4H6.5A2.5 2.5 0 0 0 4 6.5v13A2.5 2.5 0 0 0 6.5 22h11a2.5 2.5 0 0 0 2.5-2.5v-13A2.5 2.5 0 0 0 17.5 4H16"/><rect x="8" y="2" width="8" height="4" rx="1"/><path d="M8.5 13.5l2.5 2.5 4.5-5"/>',
+    minus: '<path d="M6 12h12"/>'
   };
 
   /** Static SVG icon (markup is a fixed string from ICONS — never user data). */
@@ -247,18 +294,21 @@
     return 'vocabcards.v1';
   })();
 
-  var SCHEMA_VERSION = 2; // state.version this app writes; version 1 (v1.x, spaced repetition) is migrated
+  // state.version this app writes; version 1 (v1.x, spaced repetition) and 2 (v2.x, no folders) are migrated
+  var SCHEMA_VERSION = 3;
   var DEFAULT_PREFS = {
     theme: 'auto', autoSpeak: false, speechRate: 0.9, voiceURI: null,
-    quizCount: 10,           // questions per quiz: 10 | 20 | 0 (= all)
+    // The quiz page (#/quiz): question kind, chosen decks (null = every deck, until a choice is
+    // made) and questions per quiz (10 | 20 | 50 | 0 = all).
+    quizSetup: { mode: 'choice', deckIds: null, count: 10 },
     lastBackupAt: null,      // ms of the last successful 「匯出備份」
     backupNagAt: null,       // ms of the last 「之後再說」 on the backup reminder
     iosTipDismissed: false   // the one-time iPhone Safari notice on home
   };
-  var QUIZ_COUNTS = [10, 20, 0];
+  var QUIZ_COUNTS = [10, 20, 50, 0];
   var QUIZ_MODES = ['choice', 'spell'];
   var QUIZ_TITLES = { choice: '選擇題', spell: '拼字題' };
-  var QUIZ_SHORT = { choice: '選擇', spell: '拼字' };
+  var QUIZ_HISTORY_MAX = 20;
   var CARD_TEXT_FIELDS = ['word', 'phonetic', 'meaning', 'example', 'exampleZh', 'note'];
   var DAY_MS = 86400000;
   var BACKUP_REMIND_DAYS = 14;
@@ -277,7 +327,7 @@
   var blockedToastAt = 0;
 
   function freshState() {
-    return { version: SCHEMA_VERSION, decks: [], cards: [], seq: 0, prefs: clone(DEFAULT_PREFS) };
+    return { version: SCHEMA_VERSION, folders: [], decks: [], cards: [], seq: 0, quizHistory: [], prefs: clone(DEFAULT_PREFS) };
   }
 
   function defaultSettings() {
@@ -297,26 +347,75 @@
     return out;
   }
 
-  /** deck.lastQuiz: { choice?: { score, total, at }, spell?: … } — the last finished quiz of each kind. */
-  function normalizeLastQuiz(raw) {
-    var out = {};
-    if (!raw || typeof raw !== 'object') return out;
-    QUIZ_MODES.forEach(function (m) {
-      var r = raw[m];
-      var total = r && typeof r === 'object' ? clampInt(r.total, 0, 1e6, 0) : 0;
-      if (total) out[m] = { score: clampInt(r.score, 0, total, 0), total: total, at: +r.at || 0 };
+  /** A finished quiz in state.quizHistory: { mode, deckIds, score, total, at }, or null when unusable. */
+  function normalizeHistoryEntry(e) {
+    if (!e || typeof e !== 'object' || QUIZ_MODES.indexOf(e.mode) < 0) return null;
+    var total = clampInt(e.total, 0, 1e6, 0);
+    if (!total) return null;
+    var ids = [];
+    (Array.isArray(e.deckIds) ? e.deckIds : []).forEach(function (id) {
+      if (id && ids.indexOf(String(id)) < 0) ids.push(String(id));
     });
+    return { mode: e.mode, deckIds: ids, score: clampInt(e.score, 0, total, 0), total: total, at: +e.at || 0 };
+  }
+
+  /** A valid number of questions per quiz (QUIZ_COUNTS), else null. */
+  function quizCountOf(v) {
+    return v !== null && v !== '' && typeof v !== 'boolean' && QUIZ_COUNTS.indexOf(+v) >= 0 ? +v : null;
+  }
+
+  /** Newest first, at most QUIZ_HISTORY_MAX, one entry per (at, mode). */
+  function tidyHistory(list) {
+    var seen = Object.create(null);
+    return list.filter(function (e) {
+      var k = e.at + ':' + e.mode;
+      if (seen[k]) return false;
+      seen[k] = true;
+      return true;
+    }).sort(function (a, b) { return b.at - a.at; }).slice(0, QUIZ_HISTORY_MAX);
+  }
+
+  /**
+   * prefs.quizSetup with only decks that exist. A choice whose decks are all gone falls back to
+   * every deck (null); a choice of no deck at all ([]) stays.
+   */
+  function normalizeQuizSetup(qs, decks, fallbackCount) {
+    var raw = qs && typeof qs === 'object' ? qs : {};
+    var count = quizCountOf(raw.count);
+    var out = {
+      mode: QUIZ_MODES.indexOf(raw.mode) >= 0 ? raw.mode : 'choice',
+      deckIds: null,
+      count: count === null ? fallbackCount : count
+    };
+    if (Array.isArray(raw.deckIds)) {
+      var exists = Object.create(null);
+      decks.forEach(function (d) { exists[d.id] = true; });
+      var ids = [];
+      raw.deckIds.forEach(function (id) {
+        id = str(id);
+        if (exists[id] && ids.indexOf(id) < 0) ids.push(id);
+      });
+      out.deckIds = ids.length || !raw.deckIds.length ? ids : null;
+    }
     return out;
   }
 
   /**
-   * Make any loaded / restored object safe to use: fill defaults, drop garbage. Version 1 data
-   * (spaced repetition) is migrated here: the schedule fields of every card, the day statistics
-   * and the daily limits go; every word, deck and preference stays.
+   * Make any loaded / restored object safe to use: fill defaults, drop garbage. Older data is
+   * migrated here. Version 1 (spaced repetition): the schedule fields of every card, the day
+   * statistics and the daily limits go; every word, deck and preference stays. Version 2: no
+   * folders yet (every deck outside a folder), no quiz history; the last result per deck
+   * (deck.lastQuiz) is dropped and 每次測驗題數 (prefs.quizCount) becomes prefs.quizSetup.count.
    */
   function normalizeState(raw) {
     var s = freshState();
     if (!raw || typeof raw !== 'object') return s;
+    var folderIds = Object.create(null);
+    (Array.isArray(raw.folders) ? raw.folders : []).forEach(function (f) {
+      if (!f || typeof f !== 'object' || !f.id || folderIds[f.id]) return;
+      folderIds[f.id] = true;
+      s.folders.push({ id: String(f.id), name: str(f.name).trim() || '未命名資料夾', created: +f.created || now() });
+    });
     var deckIds = {};
     (Array.isArray(raw.decks) ? raw.decks : []).forEach(function (d) {
       if (!d || typeof d !== 'object' || !d.id || deckIds[d.id]) return;
@@ -325,9 +424,9 @@
       var fl = d.flash && typeof d.flash === 'object' ? d.flash : {};
       s.decks.push({
         id: String(d.id), name: str(d.name).trim() || '未命名牌組', created: +d.created || now(),
+        folderId: d.folderId && folderIds[d.folderId] ? String(d.folderId) : null,
         settings: { direction: set.direction === 'zh2en' ? 'zh2en' : 'en2zh' },
-        flash: normalizeFlash(fl),
-        lastQuiz: normalizeLastQuiz(d.lastQuiz)
+        flash: normalizeFlash(fl)
       });
     });
     var maxSeq = 0;
@@ -346,12 +445,19 @@
       s.cards.push(card);
     });
     s.seq = Math.max(+raw.seq || 0, maxSeq);
-    s.prefs = Object.assign(clone(DEFAULT_PREFS), raw.prefs && typeof raw.prefs === 'object' ? raw.prefs : {});
+    s.quizHistory = tidyHistory((Array.isArray(raw.quizHistory) ? raw.quizHistory : [])
+      .map(normalizeHistoryEntry).filter(Boolean));
+    var rawPrefs = raw.prefs && typeof raw.prefs === 'object' ? raw.prefs : {};
+    s.prefs = Object.assign(clone(DEFAULT_PREFS), rawPrefs);
     delete s.prefs.rateHints; // v1: how often the rating buttons were explained
     if (['auto', 'light', 'dark'].indexOf(s.prefs.theme) < 0) s.prefs.theme = 'auto';
     s.prefs.speechRate = Math.max(0.5, Math.min(1.5, +s.prefs.speechRate || 0.9));
     s.prefs.autoSpeak = !!s.prefs.autoSpeak;
-    s.prefs.quizCount = QUIZ_COUNTS.indexOf(+s.prefs.quizCount) >= 0 ? +s.prefs.quizCount : DEFAULT_PREFS.quizCount;
+    // v2: 每次測驗題數 was prefs.quizCount (10 | 20 | 0)
+    var oldCount = quizCountOf(rawPrefs.quizCount);
+    delete s.prefs.quizCount;
+    s.prefs.quizSetup = normalizeQuizSetup(rawPrefs.quizSetup, s.decks,
+      oldCount === null ? DEFAULT_PREFS.quizSetup.count : oldCount);
     s.prefs.lastBackupAt = +s.prefs.lastBackupAt || null;
     s.prefs.backupNagAt = +s.prefs.backupNagAt || null;
     s.prefs.iosTipDismissed = !!s.prefs.iosTipDismissed;
@@ -385,7 +491,7 @@
     if (obj) {
       state = normalizeState(obj);
       lastSavedJSON = raw;
-      if (!(+obj.version >= SCHEMA_VERSION)) scheduleSave(); // store the migrated version-1 data
+      if (!(+obj.version >= SCHEMA_VERSION)) scheduleSave(); // store the migrated version-1 / 2 data
       return;
     }
     // Unreadable data: copy it aside before starting over. If even the copy does not fit,
@@ -501,11 +607,11 @@
 
   /**
    * Three-way merge of two tabs' data: base = what this tab saved last, mine = this tab now,
-   * theirs = what the other tab saved since. Cards, decks and settings changed (or added or
-   * deleted) only here keep this tab's version. A card changed in both keeps the text edited
+   * theirs = what the other tab saved since. Cards, decks, folders and settings changed (or added
+   * or deleted) only here keep this tab's version. A card changed in both keeps the text edited
    * here (else theirs) and the quiz answers of both tabs add up; a deck changed in both keeps
-   * the name, settings and flashcard place changed here (else theirs) and the latest quiz result
-   * of each kind.
+   * the name, folder, settings and flashcard place changed here (else theirs); a folder renamed
+   * in both keeps this tab's name. The finished quizzes of both tabs are kept (newest 20).
    */
   function mergeStates(base, mine, theirs) {
     var same = function (a, b) { return JSON.stringify(a) === JSON.stringify(b); };
@@ -528,13 +634,12 @@
       return out;
     };
     var merged = theirs;
+    merged.folders = mergeList(base.folders, mine.folders, theirs.folders, function (m, t, b) {
+      return m.name !== b.name ? Object.assign({}, t, { name: m.name }) : t;
+    });
     merged.decks = mergeList(base.decks, mine.decks, theirs.decks, function (m, t, b) {
       var d = clone(t);
-      ['name', 'settings', 'flash'].forEach(function (f) { if (!same(m[f], b[f])) d[f] = clone(m[f]); });
-      QUIZ_MODES.forEach(function (k) {
-        var mq = m.lastQuiz[k];
-        if (mq && (!d.lastQuiz[k] || mq.at > d.lastQuiz[k].at)) d.lastQuiz[k] = mq;
-      });
+      ['name', 'folderId', 'settings', 'flash'].forEach(function (f) { if (!same(m[f], b[f])) d[f] = clone(m[f]); });
       return d;
     });
     merged.cards = mergeList(base.cards, mine.cards, theirs.cards, function (m, t, b) {
@@ -546,8 +651,9 @@
     Object.keys(mine.prefs).forEach(function (k) {
       if (!same(mine.prefs[k], base.prefs[k])) merged.prefs[k] = mine.prefs[k];
     });
+    merged.quizHistory = tidyHistory(mine.quizHistory.concat(theirs.quizHistory));
     merged.seq = Math.max(+mine.seq || 0, +theirs.seq || 0);
-    return normalizeState(merged); // also drops cards of decks that are gone
+    return normalizeState(merged); // also drops cards of decks that are gone, folder ids of folders that are gone
   }
 
   /** Message for an import / restore that was rolled back because it could not be saved. */
@@ -559,9 +665,10 @@
 
   /** Run fn (which changes the state); if the result cannot be saved, put everything back. */
   function transaction(fn) {
-    var snap = { decks: state.decks.slice(), cards: state.cards.slice(), seq: state.seq };
+    var snap = { folders: state.folders.slice(), decks: state.decks.slice(), cards: state.cards.slice(), seq: state.seq };
     var changed = fn();
     if (!changed || flushSave({ quiet: true })) return true;
+    state.folders = snap.folders;
     state.decks = snap.decks;
     state.cards = snap.cards;
     state.seq = snap.seq;
@@ -584,12 +691,6 @@
     return null;
   }
 
-  function deckByName(name) {
-    var n = str(name).trim();
-    for (var i = 0; i < state.decks.length; i++) if (state.decks[i].name === n) return state.decks[i];
-    return null;
-  }
-
   /** Deck names that only differ in case, width or spaces ("我的 牌組" / "我的牌組") are the same deck. */
   function deckKey(name) {
     var s = str(name);
@@ -597,12 +698,59 @@
     return s.toLowerCase().replace(/\s+/g, '');
   }
 
-  function deckByLooseName(name) {
-    var exact = deckByName(name);
-    if (exact) return exact;
-    var k = deckKey(name);
-    for (var i = 0; i < state.decks.length; i++) if (deckKey(state.decks[i].name) === k) return state.decks[i];
+  /** Decks named name (case/width/space-insensitive), the exact spelling first. */
+  function decksByLooseName(name) {
+    var n = str(name).trim();
+    var k = deckKey(n);
+    return state.decks.filter(function (d) { return deckKey(d.name) === k; })
+      .sort(function (a, b) { return (b.name === n) - (a.name === n); });
+  }
+
+  function folderById(id) {
+    for (var i = 0; i < state.folders.length; i++) if (state.folders[i].id === id) return state.folders[i];
     return null;
+  }
+
+  /** Folder names compare like deck names (case, width and spaces do not count). */
+  function folderByLooseName(name) {
+    var k = deckKey(str(name).trim());
+    for (var i = 0; i < state.folders.length; i++) if (deckKey(state.folders[i].name) === k) return state.folders[i];
+    return null;
+  }
+
+  function sortedFolders() {
+    return state.folders.slice().sort(function (a, b) { return a.created - b.created; });
+  }
+
+  function sortedDecks() {
+    return state.decks.slice().sort(function (a, b) { return a.created - b.created; });
+  }
+
+  /** Decks of a folder (null: the decks outside any folder), oldest first. */
+  function decksInFolder(folderId) {
+    return sortedDecks().filter(function (d) { return d.folderId === folderId; });
+  }
+
+  function folderName(folderId) {
+    var f = folderId ? folderById(folderId) : null;
+    return f ? f.name : '';
+  }
+
+  function createFolder(name) {
+    var folder = { id: uid(), name: str(name).trim() || '未命名資料夾', created: now() };
+    state.folders.push(folder);
+    return folder;
+  }
+
+  /** The folder named name, made when there is none yet (import). */
+  function folderForName(name) {
+    return folderByLooseName(name) || createFolder(name);
+  }
+
+  /** Delete a folder; its decks (and their words) stay, outside any folder. */
+  function deleteFolder(folderId) {
+    state.folders = state.folders.filter(function (f) { return f.id !== folderId; });
+    state.decks.forEach(function (d) { if (d.folderId === folderId) d.folderId = null; });
   }
 
   function cardById(id) {
@@ -628,10 +776,11 @@
     return n;
   }
 
-  function createDeck(name) {
+  function createDeck(name, folderId) {
     var deck = {
       id: uid(), name: str(name).trim() || '我的單字', created: now(),
-      settings: defaultSettings(), flash: freshFlash(), lastQuiz: {}
+      folderId: folderId && folderById(folderId) ? folderId : null,
+      settings: defaultSettings(), flash: freshFlash()
     };
     state.decks.push(deck);
     return deck;
@@ -640,6 +789,7 @@
   function deleteDeck(deckId) {
     state.decks = state.decks.filter(function (d) { return d.id !== deckId; });
     state.cards = state.cards.filter(function (c) { return c.deckId !== deckId; });
+    state.prefs.quizSetup = normalizeQuizSetup(state.prefs.quizSetup, state.decks, state.prefs.quizSetup.count);
   }
 
   function cardFields(src) {
@@ -991,16 +1141,34 @@
     return h0.charAt(1) === '/' ? h0 : '#/' + h0.slice(1);
   }
 
+  /**
+   * { name, id? } of a route. The quiz page can be opened with decks chosen for it:
+   * #/quiz?deck=<id> / #/quiz?folder=<id> (and &mode=choice|spell), and the v2 links
+   * #/quiz/<deckId>/<mode>: route.preset = { deckId?, folderId?, mode? } (see applyQuizPreset).
+   */
   function parseRoute(hash) {
-    var parts = normHash(hash).slice(2).split('/');
+    var path = normHash(hash).slice(2);
+    var qi = path.indexOf('?');
+    var query = qi >= 0 ? path.slice(qi + 1) : '';
+    var parts = (qi >= 0 ? path.slice(0, qi) : path).split('/');
     var name = parts[0] || '';
     var id = '';
     try { id = parts[1] ? decodeURIComponent(parts[1]) : ''; } catch (e) { id = ''; }
     var sub = parts[2] || '';
     if (name === 'deck' && id) return sub === 'words' ? { name: 'browse', id: id } : { name: 'deck', id: id };
+    if (name === 'folder' && id) return { name: 'folder', id: id };
     if (name === 'cards' && id) return { name: 'cards', id: id };
-    if (name === 'quiz' && id && QUIZ_MODES.indexOf(sub) >= 0) return { name: 'quiz', id: id, mode: sub };
-    if ((name === 'quiz' || name === 'study') && id) return { name: 'deck', id: id }; // v1 links, unknown quiz kinds
+    if (name === 'quiz') {
+      if (parts[1] === 'run' && !sub) return { name: 'quiz-run' };
+      if (id) return { name: 'quiz', preset: { deckId: id, mode: sub } }; // v2: #/quiz/<deckId>/<mode>
+      var q = null;
+      try { q = query ? new URLSearchParams(query) : null; } catch (e) { q = null; }
+      if (q && (q.get('deck') || q.get('folder') || q.get('mode'))) {
+        return { name: 'quiz', preset: { deckId: q.get('deck'), folderId: q.get('folder'), mode: q.get('mode') } };
+      }
+      return { name: 'quiz' };
+    }
+    if (name === 'study' && id) return { name: 'deck', id: id }; // v1 links
     if (name === 'import') return { name: 'import' };
     if (name === 'settings') return { name: 'settings' };
     return { name: 'home' };
@@ -1009,7 +1177,17 @@
   function deckHash(deckId) { return '#/deck/' + enc(deckId); }
   function wordsHash(deckId) { return '#/deck/' + enc(deckId) + '/words'; }
   function cardsHash(deckId) { return '#/cards/' + enc(deckId); }
-  function quizHash(deckId, mode) { return '#/quiz/' + enc(deckId) + '/' + mode; }
+  function folderHash(folderId) { return '#/folder/' + enc(folderId); }
+  var QUIZ_HASH = '#/quiz';
+  var QUIZ_RUN_HASH = '#/quiz/run';
+  /** The quiz page with exactly these decks chosen: { deckId } or { folderId } (and mode). */
+  function quizPresetHash(o) {
+    var q = [];
+    if (o.deckId) q.push('deck=' + enc(o.deckId));
+    if (o.folderId) q.push('folder=' + enc(o.folderId));
+    if (o.mode) q.push('mode=' + enc(o.mode));
+    return QUIZ_HASH + (q.length ? '?' + q.join('&') : '');
+  }
 
   function currentRoute() { return parseRoute(location.hash); }
 
@@ -1215,12 +1393,18 @@
     // so keyboard and screen-reader users stay where they were.
     var active = document.activeElement;
     var focusAction = same && active && active !== document.body && app.contains(active) ? active.getAttribute('data-action') : null;
+    var focusSel = focusAction ? '[data-action="' + cssEscape(focusAction) + '"]' : '';
+    // Rows that share an action (a deck checkbox on the quiz page) are told apart by their ids.
+    ['data-deck-id', 'data-folder-id'].forEach(function (attr) {
+      var v = focusSel && active.getAttribute(attr);
+      if (v) focusSel += '[' + attr + '="' + cssEscape(v) + '"]';
+    });
     if (same) el.classList.add('no-anim');
     clear(app);
     app.appendChild(el);
     lastRenderKey = key;
     window.scrollTo(0, same ? y : 0);
-    var again = focusAction && el.querySelector('[data-action="' + cssEscape(focusAction) + '"]');
+    var again = focusSel && el.querySelector(focusSel);
     if (again && !again.disabled && again.focus) {
       try { again.focus({ preventScroll: true }); } catch (e) { /* ignore */ }
     }
@@ -1268,51 +1452,110 @@
   }
 
   /* =====================================================================================
-   * Home / decks
+   * Tab bar: 牌組 (#/, #/folder/<id>) · 測驗 (#/quiz). One element outside the screens, so it
+   * stays put (no fade) when the screen changes; hidden on every other screen.
+   * ===================================================================================== */
+
+  var tabBar = null;
+  var TAB_OF_ROUTE = { home: 'decks', folder: 'decks', quiz: 'quiz' };
+
+  function updateTabBar(routeName) {
+    var cur = TAB_OF_ROUTE[routeName] || null;
+    if (!tabBar && cur) {
+      var tab = function (key, iconName, label) {
+        return h('button', { type: 'button', class: 'tab', 'data-action': 'tab-' + key, 'data-tab': key,
+          onclick: function () { switchTab(key); } }, icon(iconName), h('span', { text: label }));
+      };
+      tabBar = h('nav', { class: 'tabbar', 'aria-label': '主選單' }, tab('decks', 'cards', '牌組'), tab('quiz', 'quiz', '測驗'));
+      document.body.insertBefore(tabBar, document.getElementById('toasts'));
+    }
+    document.body.classList.toggle('has-tabbar', !!cur);
+    if (!tabBar) return;
+    tabBar.hidden = !cur;
+    Array.prototype.forEach.call(tabBar.children, function (b) {
+      if (b.getAttribute('data-tab') === cur) b.setAttribute('aria-current', 'page');
+      else b.removeAttribute('aria-current');
+    });
+  }
+
+  /**
+   * Tabs do not pile up history: 牌組 goes back to the 牌組 page; 測驗 from the 牌組 page adds one
+   * entry (so back returns to 牌組), from a folder page it takes that page's place when 牌組 is
+   * right below it. The current tab again: back to the top.
+   */
+  function switchTab(key) {
+    var r = currentRoute().name;
+    if (TAB_OF_ROUTE[r] === key && (key === 'quiz' || r === 'home')) {
+      window.scrollTo({ top: 0, behavior: reducedMotion ? 'auto' : 'smooth' });
+      return;
+    }
+    if (key === 'decks') { goHome(); return; }
+    closeAllOverlays().then(function () {
+      var below = nav.idx > 0 && !nav.broken ? routes[nav.idx - 1] : null;
+      navigate(QUIZ_HASH, r !== 'home' && below === '#/');
+    });
+  }
+
+  /* =====================================================================================
+   * Home (牌組) / folders / decks
    * ===================================================================================== */
 
   var flashDeckIds = [];
 
   function renderHome() {
-    var decks = state.decks.slice().sort(function (a, b) { return a.created - b.created; });
+    var decks = sortedDecks();
+    var folders = sortedFolders();
     var head = h('header', { class: 'home-head' },
       h('div', { class: 'home-titles' }, h('h1', { class: 'app-title', text: '單字卡' })),
       iconBtn('gear', '設定', 'open-settings', function () { go('#/settings'); }));
 
     var note = homeNotice();
-    if (!decks.length) {
+    if (!decks.length && !folders.length) {
       mount(screen('home', [head, h('div', { class: 'content no-bottombar' }, note, emptyState())]), 'home');
       return;
     }
 
     var counts = cardCounts();
-    var list = h('div', { class: 'deck-list' });
-    decks.forEach(function (d) { list.appendChild(deckRow(d, counts[d.id] || 0)); });
-
-    var content = h('div', { class: 'content' },
-      note,
-      h('h2', { class: 'section-title', text: '我的牌組' }),
-      list,
-      h('div', { class: 'list-foot' },
-        h('button', { type: 'button', class: 'text-link', 'data-action': 'new-deck', onclick: newDeckFlow },
-          icon('plus'), '建立空白牌組')));
+    var loose = decks.filter(function (d) { return !d.folderId; });
+    var content = h('div', { class: 'content' }, note);
+    if (folders.length) {
+      content.appendChild(h('h2', { class: 'section-title', text: '資料夾' }));
+      content.appendChild(h('div', { class: 'deck-list' }, folders.map(function (f) { return folderRow(f, counts); })));
+    }
+    if (loose.length) {
+      content.appendChild(h('h2', { class: 'section-title', text: folders.length ? '牌組' : '我的牌組' }));
+      content.appendChild(h('div', { class: 'deck-list' }, loose.map(function (d) { return deckRow(d, counts[d.id] || 0); })));
+    }
+    content.appendChild(h('div', { class: 'list-foot' },
+      h('button', { type: 'button', class: 'text-link', 'data-action': 'new-deck', onclick: function () { newDeckFlow(null); } },
+        icon('plus'), '建立空白牌組'),
+      h('button', { type: 'button', class: 'text-link', 'data-action': 'new-folder',
+        onclick: function () { newFolderFlow().then(function (f) { if (f) { render(); toast('已新增資料夾「' + f.name + '」'); } }); } },
+        icon('folderPlus'), '新增資料夾')));
 
     var bottom = h('div', { class: 'bottombar' },
       h('button', { type: 'button', class: 'btn btn-primary btn-lg', 'data-action': 'open-import',
         onclick: function () { openImport(); } }, icon('plus'), '匯入單字'));
 
     mount(screen('home', [head, content, bottom]), 'home');
+    flashRows(content);
+  }
 
-    if (flashDeckIds.length) {
-      flashDeckIds.forEach(function (id) {
-        var row = list.querySelector('[data-deck-row="' + cssEscape(id) + '"]');
-        if (row) {
-          row.classList.add('flash');
-          if (row.scrollIntoView) row.scrollIntoView({ block: 'nearest' });
-        }
-      });
-      flashDeckIds = [];
-    }
+  /** Highlight the rows of the decks just imported (and the folders they went into). */
+  function flashRows(root) {
+    if (!flashDeckIds.length) return;
+    var rows = [];
+    flashDeckIds.forEach(function (id) {
+      var d = deckById(id);
+      var row = root.querySelector('[data-deck-row="' + cssEscape(id) + '"]') ||
+        (d && d.folderId ? root.querySelector('[data-folder-row="' + cssEscape(d.folderId) + '"]') : null);
+      if (row && rows.indexOf(row) < 0) rows.push(row);
+    });
+    rows.forEach(function (row) {
+      row.classList.add('flash');
+      if (row.scrollIntoView) row.scrollIntoView({ block: 'nearest' });
+    });
+    flashDeckIds = [];
   }
 
   function cssEscape(s) {
@@ -1406,27 +1649,39 @@
     });
   }
 
-  /** 「選擇 8/10 · 拼字 6/10」: the deck's last finished quizzes, '' when there are none. */
-  function quizScoresText(deck) {
-    var lq = deck.lastQuiz || {};
-    return QUIZ_MODES.filter(function (m) { return lq[m]; }).map(function (m) {
-      return QUIZ_SHORT[m] + ' ' + lq[m].score + '/' + lq[m].total;
-    }).join(' · ');
-  }
-
   function deckRow(deck, total) {
-    var scores = quizScoresText(deck);
-    var meta = h('div', { class: 'deck-meta' },
-      h('span', { class: 'deck-total', text: '共 ' + fmtNum(total) + ' 字' }),
-      scores ? h('span', { class: 'deck-scores', text: scores }) : null);
     var open = h('button', {
       type: 'button', class: 'deck-open', 'data-action': 'deck-open', 'data-deck-id': deck.id,
-      'aria-label': deck.name + '，共 ' + total + ' 字' + (scores ? '，上次測驗 ' + scores : ''),
+      'aria-label': deck.name + '，共 ' + total + ' 字',
       onclick: function () { go(deckHash(deck.id)); }
-    }, h('div', { class: 'deck-name', text: deck.name }), meta);
+    }, h('div', { class: 'deck-name', text: deck.name }),
+      h('div', { class: 'deck-meta' }, h('span', { class: 'deck-total', text: '共 ' + fmtNum(total) + ' 字' })));
     var more = iconBtn('more', '「' + deck.name + '」的選項', 'deck-menu', function () { openDeckMenu(deck.id); }, 'muted deck-more');
     more.setAttribute('data-deck-id', deck.id);
     return h('div', { class: 'deck-row', 'data-deck-row': deck.id }, open, more);
+  }
+
+  /** 「3 個牌組 · 98 字」 */
+  function folderStats(folderId, counts) {
+    var decks = decksInFolder(folderId);
+    var words = 0;
+    decks.forEach(function (d) { words += counts[d.id] || 0; });
+    return { decks: decks, words: words, text: decks.length + ' 個牌組 · ' + fmtNum(words) + ' 字' };
+  }
+
+  function folderRow(folder, counts) {
+    var st = folderStats(folder.id, counts);
+    var open = h('button', {
+      type: 'button', class: 'deck-open folder-open', 'data-action': 'folder-open', 'data-folder-id': folder.id,
+      'aria-label': '資料夾「' + folder.name + '」，' + st.text,
+      onclick: function () { go(folderHash(folder.id)); }
+    }, h('span', { class: 'folder-icon', 'aria-hidden': 'true' }, icon('folder')),
+      h('span', { class: 'folder-text' },
+        h('span', { class: 'deck-name', text: folder.name }),
+        h('span', { class: 'deck-meta folder-meta', text: st.text })));
+    var more = iconBtn('more', '資料夾「' + folder.name + '」的選項', 'folder-menu', function () { openFolderMenu(folder.id); }, 'muted deck-more');
+    more.setAttribute('data-folder-id', folder.id);
+    return h('div', { class: 'deck-row folder-row', 'data-folder-row': folder.id }, open, more);
   }
 
   var EMPTY_ART =
@@ -1487,15 +1742,39 @@
     render();
   }
 
-  function newDeckFlow() {
+  /** 建立空白牌組 (in folderId, or outside any folder). */
+  function newDeckFlow(folderId) {
     promptDialog({ title: '建立空白牌組', message: '建立後可以在牌組裡一個一個新增單字。', placeholder: '牌組名稱', okText: '建立', maxlength: 60 })
       .then(function (name) {
         if (name === null) return;
         name = name.trim();
         if (!name) { toast('請輸入牌組名稱', 'error'); return; }
-        var deck = createDeck(name);
+        var deck = createDeck(name, folderId);
         scheduleSave();
         go(deckHash(deck.id));
+      });
+  }
+
+  /** A folder name typed by the user: trimmed, not empty, not the name of another folder. Else null (with a toast). */
+  function checkFolderName(name, exceptId) {
+    var n = str(name).trim();
+    if (!n) { toast('請輸入資料夾名稱', 'error'); return null; }
+    var other = folderByLooseName(n);
+    if (other && other.id !== exceptId) { toast('已經有「' + other.name + '」資料夾了', 'error'); return null; }
+    return n;
+  }
+
+  /** Ask for a name and make a folder. Resolves the new folder, or null. */
+  function newFolderFlow() {
+    return promptDialog({ title: '新增資料夾', message: '例如一本課本一個資料夾，每一課一個牌組。',
+      placeholder: '資料夾名稱，例如：龍騰 B3', okText: '新增', maxlength: 60 })
+      .then(function (name) {
+        if (name === null) return null;
+        var n = checkFolderName(name);
+        if (!n) return null;
+        var folder = createFolder(n);
+        scheduleSave();
+        return folder;
       });
   }
 
@@ -1508,6 +1787,9 @@
       menuItem('sliders', '牌組設定', 'sheet-settings', function () {
         closeOverlay(ov).then(function () { openDeckSettings(deck.id); });
       }),
+      menuItem('folder', '移動到資料夾', 'deck-move', function () {
+        closeOverlay(ov).then(function () { openMoveSheet(deck.id); });
+      }),
       menuItem('download', '匯出文字檔', 'sheet-export', function () { exportDeck(deck.id); closeOverlay(ov); }),
       h('div', { class: 'menu-sep' }),
       menuItem('trash', '刪除牌組', 'sheet-delete', function () {
@@ -1516,12 +1798,105 @@
     ov = openSheet({ title: deck.name, body: body });
   }
 
+  /** Put a deck into a folder (null: outside any folder). */
+  function moveDeck(deckId, folderId) {
+    var deck = deckById(deckId);
+    if (!deck || deck.folderId === folderId) return;
+    deck.folderId = folderId;
+    scheduleSave();
+    render();
+    toast(folderId ? '已移到「' + folderName(folderId) + '」' : '已移出資料夾');
+  }
+
+  /** 移動到資料夾: 不放資料夾, every folder (the current one checked), 新增資料夾. */
+  function openMoveSheet(deckId) {
+    var deck = deckById(deckId);
+    if (!deck) return;
+    var ov;
+    var choice = function (iconName, label, folderId) {
+      var current = deck.folderId === folderId;
+      var item = h('button', {
+        type: 'button', class: 'menu-item' + (current ? ' current' : ''), 'data-action': 'move-to-folder',
+        'data-folder-id': folderId || 'none', 'aria-pressed': String(current),
+        onclick: function () {
+          closeOverlay(ov);
+          moveDeck(deckId, folderId);
+        }
+      }, icon(iconName), h('span', { class: 'menu-label', text: label }), current ? icon('check', 'menu-check') : null);
+      return item;
+    };
+    var body = h('div', { class: 'menu' },
+      choice('folderOut', '不放資料夾', null),
+      sortedFolders().map(function (f) { return choice('folder', f.name, f.id); }),
+      h('div', { class: 'menu-sep' }),
+      menuItem('folderPlus', '新增資料夾', 'move-new-folder', function () {
+        closeOverlay(ov).then(newFolderFlow).then(function (f) {
+          if (f) moveDeck(deckId, f.id);
+        });
+      }, 'primary'));
+    ov = openSheet({ title: '把「' + deck.name + '」移動到', body: body });
+  }
+
+  function openFolderMenu(folderId) {
+    var folder = folderById(folderId);
+    if (!folder) return;
+    var ov;
+    var hasCards = folderStats(folderId, cardCounts()).words > 0;
+    var body = h('div', { class: 'menu' },
+      menuItem('edit', '重新命名', 'folder-rename', function () {
+        closeOverlay(ov).then(function () { renameFolderFlow(folderId); });
+      }),
+      hasCards ? menuItem('quiz', '測驗這個資料夾', 'folder-quiz', function () {
+        go(quizPresetHash({ folderId: folderId }));
+      }) : null,
+      h('div', { class: 'menu-sep' }),
+      menuItem('trash', '刪除資料夾', 'folder-delete', function () {
+        closeOverlay(ov).then(function () { confirmDeleteFolder(folderId); });
+      }, 'danger'));
+    ov = openSheet({ title: folder.name, body: body });
+  }
+
+  function renameFolderFlow(folderId) {
+    var folder = folderById(folderId);
+    if (!folder) return;
+    promptDialog({ title: '重新命名資料夾', value: folder.name, placeholder: '資料夾名稱', okText: '儲存', maxlength: 60 })
+      .then(function (name) {
+        if (name === null) return;
+        var f = folderById(folderId); // another tab may have replaced the state meanwhile
+        var n = f && checkFolderName(name, folderId);
+        if (!n) return;
+        f.name = n;
+        scheduleSave();
+        render();
+        toast('已重新命名');
+      });
+  }
+
+  function confirmDeleteFolder(folderId) {
+    var folder = folderById(folderId);
+    if (!folder) return;
+    var n = decksInFolder(folderId).length;
+    confirmDialog({
+      title: '刪除資料夾「' + folder.name + '」？',
+      message: n ? '裡面的 ' + n + ' 個牌組會移到外面，單字不會被刪除。' : '這個資料夾是空的。',
+      okText: '刪除', danger: true
+    }).then(function (ok) {
+      if (!ok) return;
+      deleteFolder(folderId);
+      scheduleSave();
+      toast('已刪除資料夾');
+      if (currentRoute().name === 'folder' && currentRoute().id === folderId) goHome();
+      else render();
+    });
+  }
+
   function exportDeck(deckId) {
     var deck = deckById(deckId);
     if (!deck) return;
     var cards = cardsOfDeck(deck.id);
     var name = deck.name;
-    downloadFile(safeFileName(name) + '.txt', VC.serializeDeck(name, cards), 'text/plain').then(function (ok) {
+    // A deck in a folder says so in the file (#folder:), so importing it puts it in the same folder.
+    downloadFile(safeFileName(name) + '.txt', VC.serializeDeck(name, cards, folderName(deck.folderId)), 'text/plain').then(function (ok) {
       if (ok) toast('已匯出「' + name + '」（' + cards.length + ' 字）');
     });
   }
@@ -1530,6 +1905,7 @@
     var deck = deckById(deckId);
     if (!deck) return Promise.resolve(false);
     var n = cardsOfDeck(deckId).length;
+    var back = deck.folderId && folderById(deck.folderId) ? folderHash(deck.folderId) : '#/';
     return confirmDialog({
       title: '刪除「' + deck.name + '」？',
       message: '牌組裡的 ' + n + ' 個單字和測驗紀錄都會被刪除，無法復原。',
@@ -1539,7 +1915,8 @@
       deleteDeck(deckId);
       scheduleSave();
       toast('已刪除牌組');
-      if (currentRoute().id === deckId) goHome();
+      var r = currentRoute();
+      if (r.id === deckId && r.name !== 'folder') goBackTo(back); // its own screens: back to where it was listed
       else render();
       return true;
     });
@@ -1555,6 +1932,13 @@
       { value: 'en2zh', label: '英文', action: 'dir-en2zh' },
       { value: 'zh2en', label: '中文', action: 'dir-zh2en' }
     ], dir, function (v) { dir = v; }, '字卡正面');
+    // 資料夾 (once there are folders; 移動到資料夾 in the deck's ⋯ menu can also make one)
+    var folderSel = null;
+    if (state.folders.length) {
+      folderSel = h('select', { id: 'ds-folder', class: 'input' }, h('option', { value: '', text: '不放資料夾' }),
+        sortedFolders().map(function (f) { return h('option', { value: f.id, text: f.name }); }));
+      folderSel.value = deck.folderId || '';
+    }
 
     function save() {
       var name = nameIn.value.trim();
@@ -1564,6 +1948,7 @@
       if (!d) { toast('找不到這個牌組', 'error'); closeOverlay(ov); return; }
       d.name = name;
       d.settings.direction = dir;
+      if (folderSel) d.folderId = folderSel.value && folderById(folderSel.value) ? folderSel.value : null;
       scheduleSave();
       render();
       closeOverlay(ov);
@@ -1572,6 +1957,7 @@
 
     var body = h('div', { class: 'sheet-body' },
       field('牌組名稱', nameIn),
+      folderSel ? field('資料夾', folderSel) : null,
       field('字卡正面', seg, '英文：先看英文單字，翻面看中文意思；中文：先看中文意思，想想英文怎麼說。'),
       h('div', { class: 'menu-sep' }),
       h('button', { type: 'button', class: 'btn btn-ghost btn-block', 'data-action': 'ds-export',
@@ -1586,7 +1972,53 @@
   }
 
   /* =====================================================================================
-   * Deck hub (#/deck/<deckId>): 字卡 · 選擇題 · 拼字題
+   * Folder (#/folder/<folderId>): its decks, 匯入單字 into it, 測驗這個資料夾
+   * ===================================================================================== */
+
+  function renderFolder(folderId) {
+    var folder = folderById(folderId);
+    if (!folder) { toast('找不到這個資料夾'); navigate('#/', true); return; }
+    var counts = cardCounts();
+    var st = folderStats(folderId, counts);
+    var more = iconBtn('more', '資料夾選項', 'folder-menu', function () { openFolderMenu(folderId); });
+    more.setAttribute('data-folder-id', folderId);
+    var importBtn = function (cls, iconName, label) {
+      return h('button', { type: 'button', class: 'btn btn-lg ' + cls, 'data-action': 'folder-import',
+        onclick: function () { openImport(null, false, null, folderId); } }, icon(iconName), label);
+    };
+    var newDeck = function (cls) {
+      return h('button', { type: 'button', class: cls, 'data-action': 'new-deck',
+        onclick: function () { newDeckFlow(folderId); } }, icon('plus'), '建立空白牌組');
+    };
+    var children = [topbar(folder.name, backBtn(), more)];
+    if (!st.decks.length) {
+      var art = h('div');
+      art.innerHTML = EMPTY_ART; // static markup
+      children.push(h('div', { class: 'content no-bottombar' },
+        h('div', { class: 'empty folder-empty', id: 'folder-empty' },
+          art.firstChild,
+          h('h2', { text: '這個資料夾還是空的' }),
+          h('p', null, '匯入單字，新的牌組就會放進這個資料夾；', h('br'), '也可以在牌組的「⋯」選「移動到資料夾」。'),
+          h('div', { class: 'empty-actions' },
+            importBtn('btn-primary', 'upload', '匯入單字到這個資料夾'),
+            newDeck('btn btn-secondary btn-lg')))));
+    } else {
+      children.push(h('div', { class: 'content' },
+        h('p', { class: 'hub-count', id: 'folder-count', text: st.text }),
+        h('div', { class: 'deck-list' }, st.decks.map(function (d) { return deckRow(d, counts[d.id] || 0); })),
+        h('div', { class: 'list-foot' }, newDeck('text-link'))));
+      children.push(h('div', { class: 'bottombar folder-bar' },
+        importBtn(st.words ? 'btn-secondary' : 'btn-primary', 'plus', '匯入單字'),
+        st.words ? h('button', { type: 'button', class: 'btn btn-primary btn-lg', 'data-action': 'folder-quiz',
+          onclick: function () { go(quizPresetHash({ folderId: folderId })); } }, icon('quiz'), '測驗這個資料夾') : null));
+    }
+    var el = screen('folder', children);
+    mount(el, 'folder:' + folderId);
+    flashRows(el);
+  }
+
+  /* =====================================================================================
+   * Deck hub (#/deck/<deckId>): 字卡 · 測驗 (the quiz page with this deck chosen)
    * ===================================================================================== */
 
   var NO_QUESTION = {
@@ -1594,10 +2026,14 @@
     spell: '例句裡找不到單字，無法出題'
   };
 
-  /** Why a quiz can't be made from these cards (a deck without any example sentences says so). */
-  function noQuestionText(mode, deckCards) {
-    if (mode === 'spell' && !deckCards.some(function (c) { return str(c.example).trim(); })) {
-      return '單字都沒有例句，無法出題';
+  /** True for a headword of two or more words: the spelling quiz leaves phrases out (VC.isPhrase). */
+  function isPhrase(word) { return !!(VC.isPhrase && VC.isPhrase(word)); }
+
+  /** Why a quiz can't be made from these cards (no example sentences, only phrases: says so). */
+  function noQuestionText(mode, cards) {
+    if (mode === 'spell') {
+      if (!cards.some(function (c) { return str(c.example).trim(); })) return '單字都沒有例句，無法出題';
+      if (cards.every(function (c) { return isPhrase(c.word); })) return '片語不考拼字，沒有可出的題目';
     }
     return NO_QUESTION[mode];
   }
@@ -1620,40 +2056,28 @@
   }
 
   /**
-   * Cards the multiple-choice distractors come from: the deck itself, or every deck when the
-   * deck has fewer than 4 different meanings (so a small deck still gets four options).
+   * Cards the multiple-choice distractors come from: the quiz's own cards, or every card when
+   * they have fewer than 4 different meanings (so a small deck still gets four options).
    */
-  function choicePool(deckCards) {
+  function choicePool(cards) {
     var seen = Object.create(null);
     var n = 0;
-    for (var i = 0; i < deckCards.length && n < 4; i++) {
-      var k = meaningKey(deckCards[i].meaning);
+    for (var i = 0; i < cards.length && n < 4; i++) {
+      var k = meaningKey(cards[i].meaning);
       if (k && !seen[k]) { seen[k] = true; n++; }
     }
-    return n >= 4 ? deckCards : state.cards;
+    return n >= 4 ? cards : state.cards;
   }
 
   /** How many questions each quiz can make from these cards: { choice, spell }. */
-  function quizEligible(deckCards) {
-    return deckCards.length ? VC.quizEligible(deckCards, choicePool(deckCards)) : { choice: 0, spell: 0 };
+  function quizEligible(cards) {
+    return cards.length ? VC.quizEligible(cards, choicePool(cards)) : { choice: 0, spell: 0 };
   }
 
   function deckSize(deckId) {
     var n = 0;
     for (var i = 0; i < state.cards.length; i++) if (state.cards[i].deckId === deckId) n++;
     return n;
-  }
-
-  /** Start a new quiz (a fresh random set of questions) and show it. */
-  function openQuiz(deckId, mode) {
-    startQuiz(deckId, mode);
-    return go(quizHash(deckId, mode));
-  }
-
-  /** A quiz of this kind left half-way (e.g. with the back gesture): its deck tile continues it. */
-  function unfinishedQuiz(deckId, mode) {
-    return quiz && quiz.deckId === deckId && quiz.mode === mode && !quiz.finished &&
-      quiz.questions.some(function (q) { return q.result; }) ? quiz : null;
   }
 
   /** o: { action, icon, title, desc, meta: [Node|null] (right of the title), disabled, onclick } */
@@ -1669,24 +2093,6 @@
       o.disabled ? null : icon('chevron', 'tile-chev'));
   }
 
-  /**
-   * 每次測驗題數 (prefs.quizCount, shared by all decks): only the counts smaller than the deck are
-   * offered. A deck of 10 words or fewer has no choice to make: it just says 「全部 (8)」 (a lone
-   * button would only change the setting of the bigger decks).
-   */
-  function quizCountControl(n) {
-    if (n <= 10) return h('span', { class: 'quiz-count-fixed', id: 'quiz-count-fixed', text: '全部 (' + n + ')' });
-    var opts = [];
-    if (n > 10) opts.push({ value: '10', label: '10', action: 'quiz-count-10' });
-    if (n > 20) opts.push({ value: '20', label: '20', action: 'quiz-count-20' });
-    opts.push({ value: '0', label: n > 20 ? '全部' : '全部 (' + n + ')', action: 'quiz-count-all' });
-    var pref = state.prefs.quizCount;
-    return segmented(opts, pref && pref < n ? String(pref) : '0', function (v) {
-      state.prefs.quizCount = +v;
-      scheduleSave();
-    }, '每次測驗題數', 'compact quiz-seg');
-  }
-
   function renderHub(deckId) {
     var deck = deckById(deckId);
     if (!deck) { toast('找不到這個牌組'); navigate('#/', true); return; }
@@ -1699,36 +2105,17 @@
       content.appendChild(hubEmpty(deckId));
     } else {
       var can = quizEligible(cards);
-      var meta = function (text, cls) { return h('span', { class: cls || null, text: text }); };
-      var last = function (mode) {
-        var r = deck.lastQuiz[mode];
-        return r ? meta('上次 ' + r.score + '/' + r.total, 'meta-score') : null;
-      };
-      // An unfinished quiz (left with the back gesture) goes on where it was; else a fresh set.
-      var resume = function (mode) {
-        var u = unfinishedQuiz(deckId, mode);
-        return u ? meta('繼續第 ' + (u.i + 1) + ' 題', 'meta-score') : null;
-      };
-      var start = function (mode) {
-        if (unfinishedQuiz(deckId, mode)) go(quizHash(deckId, mode)); else openQuiz(deckId, mode);
-      };
       var pos = deck.flash.index;
       content.appendChild(h('p', { class: 'hub-count', id: 'hub-count', text: '共 ' + fmtNum(n) + ' 字' }));
       content.appendChild(h('div', { class: 'tiles' },
         hubTile({ action: 'hub-cards', icon: 'cards', title: '字卡', desc: '翻面背單字',
-          meta: [pos > 0 && pos < n ? meta('看到第 ' + (pos + 1) + ' 張') : null],
+          meta: [pos > 0 && pos < n ? h('span', { text: '看到第 ' + (pos + 1) + ' 張' }) : null],
           onclick: function () { go(cardsHash(deckId)); } }),
-        hubTile({ action: 'hub-choice', icon: 'choice', title: '選擇題',
-          desc: can.choice ? '看英文，選出中文意思' : NO_QUESTION.choice, disabled: !can.choice,
-          meta: can.choice ? [resume('choice') || last('choice')] : [],
-          onclick: function () { start('choice'); } }),
-        hubTile({ action: 'hub-spell', icon: 'spell', title: '拼字題',
-          desc: can.spell ? '看例句，拼出單字' : noQuestionText('spell', cards), disabled: !can.spell,
-          meta: can.spell ? [resume('spell') || last('spell'), can.spell < n ? meta('可出 ' + can.spell + ' 題') : null] : [],
-          onclick: function () { start('spell'); } })));
+        hubTile({ action: 'hub-quiz', icon: 'quiz', title: '測驗',
+          desc: can.choice || can.spell ? '選擇題或拼字題' : NO_QUESTION.choice, disabled: !can.choice && !can.spell,
+          onclick: function () { go(quizPresetHash({ deckId: deckId })); } })));
       if (needsExamples(cards)) content.appendChild(h('div', { class: 'hub-examples' }, examplesLink(deckId)));
       content.appendChild(h('div', { class: 'group hub-more' },
-        h('div', { class: 'set-row' }, h('div', { class: 'set-label', text: '每次測驗題數' }), quizCountControl(n)),
         h('button', { type: 'button', class: 'set-row', 'data-action': 'hub-words', onclick: function () { go(wordsHash(deckId)); } },
           icon('list'), h('div', { class: 'set-label', text: '瀏覽與編輯單字' }), icon('chevron', 'chev'))));
     }
@@ -1900,10 +2287,11 @@
     var view = messageView('flash-end', '🎉', '看完了！共 ' + order.length + ' 張', '接著做個小測驗，看看記住了多少吧！', [
       h('button', { type: 'button', class: 'btn btn-secondary btn-lg', 'data-action': 'flash-restart', onclick: restartFlash },
         icon('reset'), '從頭再看一次'),
+      // Straight into a quiz of this deck (the quiz page remembers it as its setup).
       h('button', { type: 'button', class: 'btn btn-tonal btn-lg', 'data-action': 'flash-to-choice', disabled: !can.choice,
-        onclick: function () { openQuiz(deck.id, 'choice'); } }, icon('choice'), '選擇題測驗'),
+        onclick: function () { openQuizFor([deck.id], 'choice'); } }, icon('choice'), '選擇題測驗'),
       h('button', { type: 'button', class: 'btn btn-tonal btn-lg', 'data-action': 'flash-to-spell', disabled: !can.spell,
-        onclick: function () { openQuiz(deck.id, 'spell'); } }, icon('spell'), '拼字題測驗'),
+        onclick: function () { openQuizFor([deck.id], 'spell'); } }, icon('spell'), '拼字題測驗'),
       // No spelling questions: say why, and how to get example sentences.
       can.spell ? null : h('p', { class: 'done-note', text: '拼字題：' + noQuestionText('spell', order) }),
       !can.spell && needsExamples(order) ? examplesLink(deck.id) : null,
@@ -2067,18 +2455,344 @@
   }
 
   /* =====================================================================================
-   * Quiz (#/quiz/<deckId>/choice | spell)
+   * Quiz page (#/quiz, the 測驗 tab): 題型 · 選擇牌組 (grouped by folder) · 題數 · 開始測驗,
+   * and 最近測驗. What is chosen stays in state.prefs.quizSetup = { mode, deckIds, count }
+   * (deckIds null = every deck, until the user picks); every change is saved and re-renders the page.
+   * ===================================================================================== */
+
+  // Folders shown open on the quiz page: { [folderId]: bool }, set each time the page is entered.
+  var quizOpen = {};
+
+  // What the quiz page needs to know about a card, kept per card object (an edited card is a new
+  // object, so nothing goes stale): whether it can make a spelling question (VC.makeCloze — the
+  // first time for a word it builds a RegExp, slow for thousands of words), and its quiz meaning
+  // key and word (for the multiple-choice count).
+  var spellCache = typeof WeakMap === 'function' ? new WeakMap() : null;
+  var choiceCache = typeof WeakMap === 'function' ? new WeakMap() : null;
+  function spellOk(card) {
+    if (!spellCache) return !!VC.makeCloze(card);
+    var v = spellCache.get(card);
+    if (v === undefined) { v = !!VC.makeCloze(card); spellCache.set(card, v); }
+    return v;
+  }
+
+  function choiceInfo(card) {
+    var v = choiceCache && choiceCache.get(card);
+    if (!v) {
+      v = { k: meaningKey(card.meaning), w: VC.normalizeWord(card.word) };
+      if (choiceCache) choiceCache.set(card, v);
+    }
+    return v;
+  }
+
+  /**
+   * How many of cards can make a multiple-choice question with wrong answers from pool — the
+   * count of VC.quizEligible(cards, pool).choice (a pool card with another, non-empty quiz meaning
+   * and another word), without its spelling work and without working out the same keys again.
+   */
+  function choiceCount(cards, pool) {
+    var from = pool.filter(function (p) { return choiceInfo(p).k; });
+    var n = 0;
+    cards.forEach(function (c) {
+      var me = choiceInfo(c);
+      for (var j = 0; j < from.length; j++) {
+        var p = from[j];
+        var pi = choiceInfo(p);
+        if (p === c || (c.id != null && p.id === c.id) || pi.k === me.k || (me.w && pi.w === me.w)) continue;
+        n++;
+        return;
+      }
+    });
+    return n;
+  }
+
+  // While the quiz page is open, the spelling checks of every card are worked out a little at a
+  // time in the background, so switching to 拼字題 (or choosing many decks) does not stall.
+  var spellWarming = false;
+  function warmSpellCache() {
+    if (spellWarming || !spellCache) return;
+    spellWarming = true;
+    var list = state.cards;
+    var i = 0;
+    var idle = window.requestIdleCallback;
+    var later = function () {
+      if (idle) idle.call(window, step, { timeout: 400 }); else setTimeout(step, 20);
+    };
+    var step = function (deadline) {
+      // Left the quiz page, or other data now: stop (the next visit starts again where the cache is).
+      if (currentRoute().name !== 'quiz' || list !== state.cards) { spellWarming = false; return; }
+      var t0 = perfNow();
+      var more = function () {
+        return deadline && deadline.timeRemaining && !deadline.didTimeout ? deadline.timeRemaining() > 1 : perfNow() - t0 < 12;
+      };
+      while (i < list.length && more()) spellOk(list[i++]);
+      if (i < list.length) later(); else spellWarming = false;
+    };
+    setTimeout(later, 200);
+  }
+
+  function quizSetup() { return state.prefs.quizSetup; }
+
+  /** The chosen decks (only those that exist), oldest first. */
+  function selectedDeckIds() {
+    var ids = quizSetup().deckIds;
+    return sortedDecks().filter(function (d) { return ids === null || ids.indexOf(d.id) >= 0; })
+      .map(function (d) { return d.id; });
+  }
+
+  function setSelectedDecks(ids) {
+    quizSetup().deckIds = sortedDecks().filter(function (d) { return ids.indexOf(d.id) >= 0; })
+      .map(function (d) { return d.id; });
+    scheduleSave();
+    render();
+  }
+
+  /** The cards of these decks, in the order they were added. */
+  function cardsOfDecks(deckIds) {
+    var set = Object.create(null);
+    deckIds.forEach(function (id) { set[id] = true; });
+    return state.cards.filter(function (c) { return set[c.deckId]; }).sort(function (a, b) { return a.seq - b.seq; });
+  }
+
+  /** How many questions of this kind the cards can make. */
+  function availableCount(mode, cards) {
+    if (!cards.length) return 0;
+    return mode === 'spell' ? cards.filter(spellOk).length : choiceCount(cards, choicePool(cards));
+  }
+
+  /** 「Unit 3」 for one deck, else 「3 個牌組」. */
+  function decksText(deckIds) {
+    var one = deckIds.length === 1 ? deckById(deckIds[0]) : null;
+    return one ? one.name : deckIds.length + ' 個牌組';
+  }
+
+  /**
+   * #/quiz?deck=<id> / ?folder=<id> (&mode=…) and the v2 links #/quiz/<deckId>/<mode>: choose
+   * exactly that deck / the decks of that folder (and that kind of question). The page then
+   * shows as plain #/quiz, so going back to it later keeps what the user chose after.
+   */
+  function applyQuizPreset(p) {
+    var qs = quizSetup();
+    var deck = p.deckId ? deckById(p.deckId) : null;
+    var folder = !deck && p.folderId ? folderById(p.folderId) : null;
+    if (deck) qs.deckIds = [deck.id];
+    else if (folder) qs.deckIds = decksInFolder(folder.id).map(function (d) { return d.id; });
+    if (QUIZ_MODES.indexOf(p.mode) >= 0) qs.mode = p.mode;
+    scheduleSave();
+  }
+
+  /** Entering the quiz page: a small collection shows every folder open; else only the partly chosen ones. */
+  function initQuizOpen(chosen) {
+    quizOpen = {};
+    var small = state.decks.length <= 8;
+    state.folders.forEach(function (f) {
+      var ds = decksInFolder(f.id);
+      var k = ds.filter(function (d) { return chosen[d.id]; }).length;
+      quizOpen[f.id] = small || (k > 0 && k < ds.length);
+    });
+  }
+
+  /** The look of a checkbox: ✓ (true), – (mixed: some of a folder's decks), empty (false). */
+  function checkMark(checked) {
+    return h('span', { class: 'check', 'aria-hidden': 'true' },
+      checked === 'true' ? icon('check') : checked === 'mixed' ? icon('minus') : null);
+  }
+
+  function renderQuizPage(route) {
+    if (route.preset) {
+      applyQuizPreset(route.preset);
+      navigate(QUIZ_HASH, true);
+      return;
+    }
+    var key = 'quiz-setup';
+    var qs = quizSetup();
+    var decks = sortedDecks();
+    var head = h('header', { class: 'home-head' },
+      h('div', { class: 'home-titles' }, h('h1', { class: 'app-title', text: '測驗' })));
+    if (!decks.length) {
+      mount(screen('quiz-setup', [head, h('div', { class: 'content no-bottombar' }, quizNoDecks())]), key);
+      return;
+    }
+
+    var sel = selectedDeckIds();
+    var chosen = Object.create(null);
+    sel.forEach(function (id) { chosen[id] = true; });
+    if (lastRenderKey !== key) initQuizOpen(chosen);
+    var byDeck = Object.create(null);
+    state.cards.forEach(function (c) { (byDeck[c.deckId] = byDeck[c.deckId] || []).push(c); });
+    var selCards = cardsOfDecks(sel);
+    var available = availableCount(qs.mode, selCards);
+
+    var modeOpt = function (mode, iconName, desc) {
+      return h('button', {
+        type: 'button', class: 'mode-opt', 'data-action': 'quiz-mode-' + mode, 'aria-pressed': String(qs.mode === mode),
+        onclick: function () { if (qs.mode !== mode) { qs.mode = mode; scheduleSave(); render(); } }
+      }, h('span', { class: 'mo-head' }, icon(iconName), h('span', { text: QUIZ_TITLES[mode] })),
+        h('span', { class: 'mo-desc', text: desc }));
+    };
+
+    var deckPick = function (d, inFolder) {
+      var cards = byDeck[d.id] || [];
+      var n = cards.length;
+      var meta = '還沒有單字';
+      var dim = !n;
+      if (n) {
+        meta = fmtNum(n) + ' 字';
+        if (qs.mode === 'spell') {
+          var k = cards.filter(spellOk).length;
+          if (!k) { meta += ' · 沒有可出的題目'; dim = true; }
+          else if (k < n) meta += ' · 可出 ' + fmtNum(k) + ' 題';
+        }
+      }
+      var on = !!chosen[d.id];
+      return h('button', {
+        type: 'button', role: 'checkbox', 'aria-checked': String(on),
+        class: 'pick-row' + (inFolder ? ' in-folder' : '') + (dim ? ' dim' : ''),
+        'data-action': 'quiz-deck', 'data-deck-id': d.id,
+        onclick: function () {
+          setSelectedDecks(on ? sel.filter(function (id) { return id !== d.id; }) : sel.concat(d.id));
+        }
+      }, checkMark(String(on)),
+        h('span', { class: 'pick-main' }, h('span', { class: 'pick-name', text: d.name }), h('span', { class: 'pick-meta', text: meta })));
+    };
+
+    var groups = [];
+    var folders = sortedFolders();
+    folders.forEach(function (f) {
+      var ds = decksInFolder(f.id);
+      if (!ds.length) return;
+      var k = ds.filter(function (d) { return chosen[d.id]; }).length;
+      var checked = !k ? 'false' : k === ds.length ? 'true' : 'mixed';
+      var open = !!quizOpen[f.id];
+      var ids = ds.map(function (d) { return d.id; });
+      var toggle = iconBtn('chevron', (open ? '收合' : '展開') + '「' + f.name + '」', 'quiz-folder-toggle', function () {
+        quizOpen[f.id] = !open;
+        render();
+      }, 'muted pick-toggle');
+      toggle.setAttribute('aria-expanded', String(open));
+      toggle.setAttribute('data-folder-id', f.id);
+      groups.push(h('div', { class: 'group pick-group' + (open ? ' open' : ''), 'data-folder-group': f.id },
+        h('div', { class: 'pick-folder' },
+          h('button', {
+            type: 'button', role: 'checkbox', 'aria-checked': checked, class: 'pick-row folder-pick',
+            'data-action': 'quiz-folder', 'data-folder-id': f.id,
+            onclick: function () {
+              setSelectedDecks(checked === 'true' ? sel.filter(function (id) { return ids.indexOf(id) < 0; }) : sel.concat(ids));
+            }
+          }, checkMark(checked), h('span', { class: 'pick-ficon', 'aria-hidden': 'true' }, icon('folder')),
+            h('span', { class: 'pick-main' }, h('span', { class: 'pick-name', text: f.name }),
+              h('span', { class: 'pick-meta', text: checked === 'mixed' ? '已選 ' + k + ' / ' + ds.length + ' 個牌組' : ds.length + ' 個牌組' }))),
+          toggle),
+        open ? ds.map(function (d) { return deckPick(d, true); }) : null));
+    });
+    var loose = decks.filter(function (d) { return !d.folderId; });
+    if (loose.length) {
+      if (groups.length) groups.push(h('h3', { class: 'pick-label', text: '未分類' }));
+      groups.push(h('div', { class: 'group pick-group' }, loose.map(function (d) { return deckPick(d, false); })));
+    }
+
+    var allOn = sel.length === decks.length;
+    var content = h('div', { class: 'content quiz-setup' },
+      resumeTile(),
+      h('h2', { class: 'section-title', text: '題型' }),
+      h('div', { class: 'mode-seg', role: 'group', 'aria-label': '題型' },
+        modeOpt('choice', 'choice', '看英文選中文'), modeOpt('spell', 'spell', '看例句拼單字')),
+      h('div', { class: 'section-head' },
+        h('h2', { class: 'section-title', text: '選擇牌組' }),
+        h('button', { type: 'button', class: 'text-link section-link', 'data-action': allOn ? 'quiz-none' : 'quiz-all',
+          text: allOn ? '全部取消' : '全選',
+          onclick: function () { setSelectedDecks(allOn ? [] : decks.map(function (d) { return d.id; })); } })),
+      h('div', { class: 'pick-list', id: 'quiz-decks' }, groups));
+
+    if (available) {
+      var opts = [];
+      [10, 20, 50].forEach(function (c) {
+        if (c < available) opts.push({ value: String(c), label: String(c), action: 'quiz-count-' + c });
+      });
+      opts.push({ value: '0', label: '全部 (' + fmtNum(available) + ')', action: 'quiz-count-all' });
+      content.appendChild(h('h2', { class: 'section-title', text: '題數' }));
+      content.appendChild(segmented(opts, qs.count && qs.count < available ? String(qs.count) : '0', function (v) {
+        qs.count = +v;
+        scheduleSave();
+      }, '題數', 'count-seg'));
+    }
+    // One deck with too few example sentences for the spelling quiz: how to get them.
+    if (qs.mode === 'spell' && sel.length === 1 && selCards.length && needsExamples(selCards)) {
+      content.appendChild(h('div', { class: 'hub-examples' }, examplesLink(sel[0])));
+    }
+    append(content, recentQuizzes());
+
+    var reason = !sel.length ? '請先選擇要測驗的牌組'
+      : !selCards.length ? '選的牌組還沒有單字'
+      : !available ? noQuestionText(qs.mode, selCards) : '';
+    var summary = h('p', { class: 'start-summary' + (reason ? ' warn' : ''), id: 'quiz-summary' },
+      sel.length ? '已選 ' + sel.length + ' 個牌組 · ' : '', reason || '可出 ' + fmtNum(available) + ' 題');
+    var start = h('button', { type: 'button', class: 'btn btn-primary btn-lg', 'data-action': 'quiz-start',
+      disabled: !available, text: '開始測驗',
+      onclick: function () {
+        startQuiz({ mode: qs.mode, deckIds: selectedDeckIds(), count: qs.count });
+        go(QUIZ_RUN_HASH);
+      } });
+
+    mount(screen('quiz-setup', [head, content, h('div', { class: 'bottombar start-bar' }, summary, start)]), key);
+    warmSpellCache();
+  }
+
+  /** 「繼續第 N 題」: a quiz left half-way (back gesture / button) goes on where it was. */
+  function resumeTile() {
+    if (!quiz || quiz.finished || !quiz.questions.some(function (q) { return q.result; })) return null;
+    return h('button', { type: 'button', class: 'tile resume-tile', 'data-action': 'quiz-resume',
+      onclick: function () { go(QUIZ_RUN_HASH); } },
+      h('span', { class: 'tile-icon' }, icon(quiz.mode)),
+      h('span', { class: 'tile-text' },
+        h('span', { class: 'tile-head' },
+          h('span', { class: 'tile-title', text: '繼續第 ' + (quiz.i + 1) + ' 題' }),
+          h('span', { class: 'tile-meta', text: '共 ' + quiz.questions.length + ' 題' })),
+        h('span', { class: 'tile-desc', text: quiz.retry ? '重測答錯的題目' : QUIZ_TITLES[quiz.mode] + ' · ' + decksText(quiz.deckIds) })),
+      icon('chevron', 'tile-chev'));
+  }
+
+  /** 最近測驗: the last 5 finished quizzes, 「選擇題 · 3 個牌組 · 8/10 · 10/16」. */
+  function recentQuizzes() {
+    var list = state.quizHistory.slice(0, 5);
+    if (!list.length) return null;
+    var sep = function () { return h('span', { class: 'sr-only', text: ' · ' }); };
+    return [h('h2', { class: 'section-title', text: '最近測驗' }),
+      h('div', { class: 'group recent-list', id: 'quiz-recent' }, list.map(function (e) {
+        var d = new Date(e.at);
+        return h('div', { class: 'recent-row' },
+          h('span', { class: 'recent-main', text: QUIZ_TITLES[e.mode] + ' · ' + decksText(e.deckIds) }), sep(),
+          h('span', { class: 'recent-score', text: e.score + '/' + e.total }), sep(),
+          h('span', { class: 'recent-date', text: (d.getMonth() + 1) + '/' + d.getDate() }));
+      }))];
+  }
+
+  function quizNoDecks() {
+    var art = h('div');
+    art.innerHTML = EMPTY_ART; // static markup
+    return h('div', { class: 'empty', id: 'quiz-no-decks' },
+      art.firstChild,
+      h('h2', { text: '還沒有牌組' }),
+      h('p', null, '先匯入單字，', h('br'), '就能在這裡選牌組來測驗。'),
+      h('div', { class: 'empty-actions' },
+        h('button', { type: 'button', class: 'btn btn-primary btn-lg', 'data-action': 'open-import',
+          onclick: function () { openImport(); } }, icon('upload'), '匯入單字')));
+  }
+
+  /* =====================================================================================
+   * Running quiz (#/quiz/run): questions from every chosen deck.
    *
-   * quiz = { id, deckId, mode, questions, i, retry, finished, timer, answeredAt, shownAt, enter, spoken, ui }
+   * quiz = { id, mode, deckIds, count, questions, i, retry, finished, timer, answeredAt, shownAt, enter, spoken, ui }
    *   questions  from VC.buildQuiz; an answered question gets
-   *              q.result = { correct, chosen? (choice), input?, gaveUp?, otherForm? (spell), word, meaning }
-   *   retry      a 「重測答錯的題目」 round: its score is not kept as the deck's last result
+   *              q.result = { correct, chosen? (choice), input?, gaveUp?, otherForm? (spell), word, meaning, deckId }
+   *   retry      a 「重測答錯的題目」 round: its score does not go into 最近測驗 (state.quizHistory)
    *   answeredAt, shownAt  perfNow() of the last answer / of the question coming up (tap guards)
    *   ui         the parts of the question screen that change in place. The next question re-uses
    *              the same answer box, so the phone keyboard stays open from question to question.
-   * The session is in memory only: back and then forward again continues it, and so does the
-   * deck tile of an unfinished quiz with answers; 「再測一次」, the end of the flashcards and the
-   * tiles otherwise make a fresh set. 「結束」 in the ✕ dialog throws the session away.
+   * The session is in memory only: back and then forward again continues it, and so does 「繼續第 N
+   * 題」 on the quiz page while it has answers; 開始測驗, 「再測一次」 and the end of the flashcards
+   * make a fresh set. 「結束」 in the ✕ dialog throws the session away. Without a session (e.g. the
+   * page was reloaded) #/quiz/run shows the quiz page.
    * ===================================================================================== */
 
   var quiz = null;
@@ -2090,9 +2804,11 @@
   // second Enter does not hide the correction.
   var WRONG_ANSWER_GUARD_MS = 500;
 
-  function newQuizSession(deckId, mode, questions, retry) {
+  /** setup: { mode, deckIds, count } */
+  function newQuizSession(setup, questions, retry) {
     return {
-      id: ++quizSerial, deckId: deckId, mode: mode, questions: questions, i: 0, retry: !!retry,
+      id: ++quizSerial, mode: setup.mode, deckIds: setup.deckIds.slice(), count: setup.count,
+      questions: questions, i: 0, retry: !!retry,
       finished: false, timer: null, answeredAt: 0, shownAt: perfNow(), enter: true, spoken: '', ui: null
     };
   }
@@ -2108,12 +2824,27 @@
     return !!(q && q.result && !q.result.correct && perfNow() - quiz.answeredAt < WRONG_ANSWER_GUARD_MS);
   }
 
-  function startQuiz(deckId, mode) {
+  /**
+   * A fresh random set of questions from the cards of setup.deckIds. The wrong choices come from
+   * the same cards (all cards when they have fewer than 4 different meanings).
+   */
+  function startQuiz(setup) {
     stopQuizTimer();
-    var cards = cardsOfDeck(deckId);
-    var pool = mode === 'choice' ? choicePool(cards) : cards;
-    var questions = cards.length ? VC.buildQuiz(cards, mode, state.prefs.quizCount, rand, pool) || [] : [];
-    quiz = newQuizSession(deckId, mode, questions, false);
+    var ids = setup.deckIds.filter(function (id) { return deckById(id); });
+    var cards = cardsOfDecks(ids);
+    var pool = setup.mode === 'choice' ? choicePool(cards) : cards;
+    var questions = cards.length ? VC.buildQuiz(cards, setup.mode, setup.count, rand, pool) || [] : [];
+    quiz = newQuizSession({ mode: setup.mode, deckIds: ids, count: setup.count }, questions, false);
+  }
+
+  /** Straight into a quiz of these decks (end of the flashcards); the quiz page keeps it as its setup. */
+  function openQuizFor(deckIds, mode) {
+    var qs = quizSetup();
+    qs.mode = mode;
+    qs.deckIds = deckIds.slice();
+    scheduleSave();
+    startQuiz(qs);
+    return go(QUIZ_RUN_HASH);
   }
 
   function stopQuizTimer() {
@@ -2128,24 +2859,16 @@
     return quiz.questions.filter(function (q) { return q.result && q.result.correct; }).length;
   }
 
-  function renderQuiz(deckId, mode) {
-    var deck = deckById(deckId);
-    if (!deck) { toast('找不到這個牌組'); navigate('#/', true); return; }
-    if (!quiz || quiz.deckId !== deckId || quiz.mode !== mode) startQuiz(deckId, mode);
-    var title = QUIZ_TITLES[mode];
-    var quit = iconBtn('close', quiz.finished ? '關閉' : '結束測驗', 'quiz-quit', quitQuiz);
-    if (!quiz.questions.length) {
-      var deckCards = cardsOfDeck(deckId);
-      var why = noQuestionText(mode, deckCards) + (mode === 'spell' ? '。\n可以在「瀏覽與編輯單字」裡，幫單字加上含有它的例句。' : '。');
-      mount(screen('quiz', [topbar(title, quit), messageView('quiz-empty', '🤔', '沒辦法出' + title, why, [
-        h('button', { type: 'button', class: 'btn btn-primary btn-lg', 'data-action': 'quiz-home', text: '回到牌組',
-          onclick: function () { goBackTo(deckHash(deckId)); } }),
-        mode === 'spell' && deckCards.length && needsExamples(deckCards) ? examplesLink(deckId) : null])]),
-        'quiz-empty:' + deckId);
-      return;
+  function renderQuizRun() {
+    if (quiz && !quiz.questions.length) {
+      quiz = null;
+      toast('沒有可以出的題目', 'error');
     }
+    if (!quiz) { navigate(QUIZ_HASH, true); return; }
+    var title = QUIZ_TITLES[quiz.mode];
+    var quit = iconBtn('close', quiz.finished ? '關閉' : '結束測驗', 'quiz-quit', quitQuiz);
     if (quiz.finished) {
-      mount(screen('quiz', [topbar(title, quit), resultsView(deck)]), 'quiz-results:' + quiz.id);
+      mount(screen('quiz', [topbar(title, quit), resultsView()]), 'quiz-results:' + quiz.id);
       return;
     }
     renderQuestionScreen(title, quit);
@@ -2386,6 +3109,7 @@
     var card = cardById(q.cardId);
     res.word = card ? card.word : q.word || (q.cloze && q.cloze.answer) || '';
     res.meaning = card ? card.meaning : q.options ? q.options[q.answerIndex] : '';
+    res.deckId = card ? card.deckId : '';
     if (card) {
       if (res.correct) card.right = (card.right || 0) + 1;
       else card.wrong = (card.wrong || 0) + 1;
@@ -2421,12 +3145,17 @@
     speakWord(q.word);
   }
 
+  /** The end: a quiz that is not a 重測 round goes into 最近測驗 (state.quizHistory, newest first). */
   function finishQuiz() {
     stopQuizTimer();
     quiz.finished = true;
-    var deck = deckById(quiz.deckId);
-    if (deck && !quiz.retry) {
-      deck.lastQuiz[quiz.mode] = { score: quizScore(), total: quiz.questions.length, at: now() };
+    if (!quiz.retry) {
+      var mode = quiz.mode;
+      var at = now();
+      // (at, mode) tells entries apart when tabs merge their histories: keep it unique.
+      while (state.quizHistory.some(function (e) { return e.at === at && e.mode === mode; })) at++;
+      state.quizHistory = tidyHistory([{ mode: mode, deckIds: quiz.deckIds.slice(), score: quizScore(),
+        total: quiz.questions.length, at: at }].concat(state.quizHistory));
       scheduleSave();
     }
     render();
@@ -2439,7 +3168,7 @@
     confirmDialog({ title: '要結束測驗嗎？', message: '這次的成績不會保存。', okText: '結束', cancelText: '繼續作答' })
       .then(function (ok) {
         if (ok) {
-          quiz = null; // ended: the deck tile starts a fresh set (not 「繼續」)
+          quiz = null; // ended: no 「繼續第 N 題」 on the quiz page
           goBack();
         } else if (quiz && quiz.mode === 'spell') focusSpellInput();
       });
@@ -2458,7 +3187,7 @@
       return c;
     });
     if (!questions.length) return;
-    quiz = newQuizSession(quiz.deckId, mode, questions, true);
+    quiz = newQuizSession(quiz, questions, true);
     render();
   }
 
@@ -2489,20 +3218,22 @@
     return svg;
   }
 
-  function resultsView(deck) {
-    var mode = quiz.mode;
-    var total = quiz.questions.length;
+  function resultsView() {
+    var session = quiz;
+    var mode = session.mode;
+    var total = session.questions.length;
     var score = quizScore();
     var pct = Math.round(score / total * 100);
-    var wrong = quiz.questions.filter(function (q) { return !q.result || !q.result.correct; });
+    var wrong = session.questions.filter(function (q) { return !q.result || !q.result.correct; });
+    var multi = session.deckIds.length > 1;
 
     var actions = h('div', { class: 'results-actions' },
       wrong.length ? h('button', { type: 'button', class: 'btn btn-primary btn-lg', 'data-action': 'retry-wrong',
         onclick: retryWrong }, icon('reset'), '重測答錯的 ' + wrong.length + ' 題') : null,
       h('button', { type: 'button', class: 'btn btn-lg ' + (wrong.length ? 'btn-secondary' : 'btn-primary'),
-        'data-action': 'quiz-again', text: '再測一次', onclick: function () { startQuiz(deck.id, mode); render(); } }),
-      h('button', { type: 'button', class: 'btn btn-ghost btn-lg', 'data-action': 'quiz-home', text: '回到牌組',
-        onclick: function () { goBackTo(deckHash(deck.id)); } }));
+        'data-action': 'quiz-again', text: '再測一次', onclick: function () { startQuiz(session); render(); } }),
+      h('button', { type: 'button', class: 'btn btn-ghost btn-lg', 'data-action': 'quiz-home', text: '回到測驗',
+        onclick: function () { goBackTo(QUIZ_HASH); } }));
 
     var list = null;
     if (wrong.length) {
@@ -2511,10 +3242,12 @@
           var r = q.result || {};
           // Spelling: the form the sentence needed, when it is not the word itself (abandon → abandoned).
           var form = mode === 'spell' && q.cloze.answer.toLowerCase() !== str(r.word).toLowerCase() ? q.cloze.answer : '';
+          var deck = multi && r.deckId ? deckById(r.deckId) : null; // which deck, when several were tested
           return h('div', { class: 'wl-row', 'data-card-id': q.cardId },
             h('div', { class: 'wr-main' },
               h('div', { class: 'wr-word', lang: 'en', text: r.word }),
-              h('div', { class: 'wr-meaning', text: oneLine(r.meaning) })),
+              h('div', { class: 'wr-meaning', text: oneLine(r.meaning) }),
+              deck ? h('div', { class: 'wr-deck', text: deck.name }) : null),
             form ? h('span', { class: 'pill p-form', lang: 'en', text: form }) : null);
         }))];
     }
@@ -2525,7 +3258,8 @@
           h('p', { class: 'score-num', id: 'quiz-score' }, h('b', { text: String(score) }), ' / ' + total),
           h('p', { class: 'score-pct', text: pct + '%' }))),
       h('h2', { class: 'score-line', text: pct >= 90 ? '太厲害了！' : pct >= 70 ? '不錯喔，繼續加油！' : '多練幾次就會記住了！' }),
-      h('p', { class: 'score-sub', text: quiz.retry ? '重測答錯的題目' : QUIZ_TITLES[mode] + ' · ' + total + ' 題' }),
+      h('p', { class: 'score-sub', text: (session.retry ? '重測答錯的題目' : QUIZ_TITLES[mode] + ' · ' + total + ' 題') +
+        ' · ' + decksText(session.deckIds) }),
       actions,
       list);
   }
@@ -2574,14 +3308,16 @@
       return f;
     }
 
-    // Under the example: what the spelling quiz will ask, or that it cannot find the word.
+    // Under the example: what the spelling quiz will ask, or that it cannot find the word (phrases: not asked).
     var exampleHint = h('p', { class: 'field-hint', id: 'f-example-hint' });
     function updateExampleHint() {
       var w = inputs.word.value.trim();
       var ex = inputs.example.value.trim();
-      var cz = w && ex ? VC.makeCloze({ word: w, example: ex }) : null;
-      exampleHint.classList.toggle('warn', !!(w && ex && !cz));
-      exampleHint.textContent = !w || !ex ? '例句裡要有這個單字，拼字題才能從例句出題。'
+      var phrase = isPhrase(w);
+      var cz = w && ex && !phrase ? VC.makeCloze({ word: w, example: ex }) : null;
+      exampleHint.classList.toggle('warn', !!(w && ex && !cz && !phrase));
+      exampleHint.textContent = phrase ? '片語不考拼字（拼字題只考一個字的單字），例句照常寫就好。'
+        : !w || !ex ? '例句裡要有這個單字，拼字題才能從例句出題。'
         : cz ? '拼字題：' + oneLine(cz.beforeMasked + cz.masked + cz.afterMasked)
         : '例句裡找不到「' + w + '」，拼字題會跳過這張卡（不規則變化、拆開的片語都找不到）。';
     }
@@ -2669,9 +3405,13 @@
     return card.wrong > 0 ? h('span', { class: 'pill p-wrong', title: '測驗答錯 ' + card.wrong + ' 次', text: '錯 ' + card.wrong }) : null;
   }
 
-  /** 「不考拼字」 for a word whose example sentence does not contain it (the spelling quiz skips it). */
+  /**
+   * 「片語不考拼字」 for a phrase, 「不考拼字」 for a word whose example sentence does not contain it
+   * (the spelling quiz skips both).
+   */
   function noSpellPill(card) {
-    return str(card.example).trim() && !VC.makeCloze(card)
+    if (isPhrase(card.word)) return h('span', { class: 'pill p-nospell', title: '拼字題只考一個字的單字', text: '片語不考拼字' });
+    return str(card.example).trim() && !spellOk(card)
       ? h('span', { class: 'pill p-nospell', title: '例句裡找不到這個單字，拼字題會跳過', text: '不考拼字' }) : null;
   }
 
@@ -2801,14 +3541,14 @@
     '請嚴格遵守下面的格式：',
     '1. 如果你能直接產生檔案，就給我 UTF-8 的 .txt 檔；否則把整份內容放在一個 ```text 程式碼區塊裡。只輸出檔案內容本身，不要用 Markdown 表格、編號、項目符號或粗體。',
     '2. 開頭可以有幾行 # 開頭的註解（主題、字數），但註解不要以 #deck 開頭。',
-    '3. 每個牌組用一行「#deck: 牌組名稱」開始；一個牌組只寫一次 #deck:，不同牌組的名稱不要重複。',
+    '3. 每個牌組用一行「#deck: 牌組名稱」開始；一個牌組只寫一次 #deck:，不同牌組的名稱不要重複。如果我有說要放進哪個資料夾（例如課本名稱），就在第一個 #deck: 前面加一行「#folder: 資料夾名稱」。',
     '4. 一行一張卡，固定格式：',
     '   word | /IPA/ | pos. 中文意思 | Natural English example sentence. | 自然的中文翻譯',
     '   需要時可以加第 6 欄備註（片語、常見搭配、同反義字），例如：| be reluctant to + V 不情願做……',
     '5. 分隔符號一律用半形 |，前後各空一格；不要用 Tab 或逗號。欄位內容裡不要出現 |（真的需要就寫 \\|），也不要換行（需要時寫 \\n）。',
     '6. 音標用美式（General American）IPA，寫在 /…/ 裡，例如 /əˈbændən/；名詞、動詞唸法不同時都寫在這一欄，例如 /ˈprezənt/ (n.) /prɪˈzent/ (v.)。不確定音標時整欄省略（直接寫 word | pos. 中文意思 | …），不要留空欄。',
     '7. 中文意思用台灣慣用的繁體中文，詞性縮寫放最前面（n. v. adj. adv. prep. conj. pron. phr. 等）；同一詞性的多個意思用全形分號「；」隔開，不同詞性接著寫，例如 v. 接近；靠近；n. 方法。衍生字、搭配詞這類英文補充寫在第 6 欄備註，不要寫在中文意思裡；片語的句型（+ N、+ V-ing）也寫在備註，例如 look forward to | phr. 期待 | 例句 | 翻譯 | look forward to + N / V-ing。',
-    '8. ' + EXAMPLE_RULE,
+    '8. ' + EXAMPLE_RULE + '片語（兩個字以上）不會出拼字題，例句照常寫就好。',
     '9. 不要加標題列（例如 word | meaning），同一個單字只寫一行，不要重複。',
     '',
     '範例：',
@@ -2824,7 +3564,7 @@
       '下面是我的「單字卡」App 單字檔，請幫每個單字補上例句和例句翻譯，改好的檔案要能直接匯入 App。',
       '',
       '請嚴格遵守下面的規則：',
-      '1. #deck: 那一行和每一行的單字都不要改，也不要增加、刪除或合併單字；有音標的照原本的寫。',
+      '1. #deck:（和 #folder:）那一行和每一行的單字都不要改，也不要增加、刪除或合併單字；有音標的照原本的寫。',
       '2. 每一行寫成：word | /IPA/ | pos. 中文意思 | Natural English example sentence. | 自然的中文翻譯 | 備註（沒有音標就省略音標那一欄，沒有備註就省略最後一欄）。',
       '3. 中文意思保持原樣；但意思裡 →、← 或括號（…）中的英文補充（衍生字、搭配詞、句型），請搬到第 6 欄備註，中文意思欄只留中文。',
       '4. ' + EXAMPLE_RULE,
@@ -2832,7 +3572,7 @@
       '',
       '單字檔：',
       '```text',
-      VC.serializeDeck(deck.name, cards).trim(),
+      VC.serializeDeck(deck.name, cards, folderName(deck.folderId)).trim(),
       '```'
     ].join('\n');
   }
@@ -2861,23 +3601,28 @@
     openSheet({ title: '請 Claude 補例句', body: body, foot: foot });
   }
 
-  var imp = { files: [], text: '', target: 'new', names: {}, dupMode: 'skip', focusPaste: false };
+  // folder: the 資料夾 of new decks: '' (none), a folder id, or 'new' = a folder named newFolder,
+  // made when the import happens. askFolder: opened from a folder page (資料夾 shows from the start).
+  var imp = null;
   var impUI = null;
 
   function resetImport() {
-    imp = { files: [], text: '', target: 'new', names: {}, dupMode: 'skip', focusPaste: false };
+    imp = { files: [], text: '', target: 'new', names: {}, dupMode: 'skip', focusPaste: false, folder: '', newFolder: '', askFolder: false };
   }
+  resetImport();
 
   /**
    * Open the import screen. deckId: words without #deck go into that deck (opened from an empty
    * deck); otherwise into a new deck. dupMode: preselect 'update' (Claude's reply with examples
-   * for words already in the deck). Text or files still waiting there are kept.
+   * for words already in the deck). folderId: new decks go into that folder (opened from a folder
+   * page). Text or files still waiting there are kept.
    */
-  function openImport(deckId, focusPaste, dupMode) {
+  function openImport(deckId, focusPaste, dupMode, folderId) {
     if (!imp.text.trim() && !imp.files.length) resetImport();
     if (deckId) imp.target = deckId;
     if (focusPaste) imp.focusPaste = true;
     if (dupMode) imp.dupMode = dupMode;
+    if (folderId) { imp.folder = folderId; imp.askFolder = true; }
     return go('#/import');
   }
 
@@ -2922,13 +3667,36 @@
   }
 
   /**
+   * The deck a section of a file goes into, if it exists. With "#folder: F" in the file: the deck
+   * of that name in folder F (none: a new deck in F). Without: the one in the folder chosen for
+   * the import, else one outside any folder, else one in any folder (it stays where it is).
+   */
+  function importDeck(name, fileFolder, chosenFolderId) {
+    var same = decksByLooseName(name);
+    if (!same.length) return null;
+    var find = function (test) { for (var i = 0; i < same.length; i++) if (test(same[i])) return same[i]; return null; };
+    if (fileFolder) {
+      var k = deckKey(fileFolder);
+      return find(function (d) { var f = folderById(d.folderId); return !!f && deckKey(f.name) === k; });
+    }
+    return (chosenFolderId && find(function (d) { return d.folderId === chosenFolderId; })) ||
+      find(function (d) { return !d.folderId; }) || same[0];
+  }
+
+  /**
    * Work out where every parsed card would go, without changing anything.
    * sources: [{ id, name, defaultDeckName, text }]
-   * opts: { target: 'new' | deckId, names: { [sourceId]: deckName }, dupMode: 'skip' | 'update' }
+   * opts: { target: 'new' | deckId, names: { [sourceId]: deckName }, dupMode: 'skip' | 'update',
+   *         folder: null | { id } | { name } — the folder of new decks (a "#folder:" in the file wins) }
+   * Each group (one deck) has folder = the name of the folder its deck is / will be in ('' = none)
+   * and fileFolder = the "#folder:" of the file for a new deck.
    */
   function planImport(sources, opts) {
     var dupMode = opts.dupMode === 'update' ? 'update' : 'skip';
     var targetDeck = opts.target && opts.target !== 'new' ? deckById(opts.target) : null;
+    var chosen = opts.folder || null;
+    var chosenId = chosen && chosen.id && folderById(chosen.id) ? chosen.id : null;
+    var chosenName = chosenId ? folderName(chosenId) : chosen && chosen.name ? str(chosen.name).trim() : '';
     var groups = {};
     var order = [];
     var errors = [];
@@ -2940,13 +3708,16 @@
     var used = [];
 
     function groupFor(dest, fromSection) {
-      var key = dest.deck ? 'id:' + dest.deck.id : 'new:' + deckKey(dest.name);
+      var key = dest.deck ? 'id:' + dest.deck.id
+        : 'new:' + (dest.folder ? 'f:' + deckKey(dest.folder) : '') + ':' + deckKey(dest.name);
       var g = groups[key];
       if (g) return g;
       // Word-keyed maps without a prototype: "constructor" / "__proto__" are ordinary words.
       g = groups[key] = {
         key: key, deckId: dest.deck ? dest.deck.id : null, name: dest.deck ? dest.deck.name : dest.name,
         isNew: !dest.deck, fromSection: fromSection, adds: [], updates: [], dups: 0, merged: 0,
+        fileFolder: dest.deck ? '' : dest.folder || '',
+        folder: dest.deck ? folderName(dest.deck.folderId) : dest.folder || chosenName,
         seen: Object.create(null), existing: Object.create(null)
       };
       if (dest.deck) {
@@ -2960,10 +3731,16 @@
       return g;
     }
 
-    function destByName(name) {
+    function destByName(name, fileFolder) {
       var nm = str(name).trim() || '我的單字';
-      var d = deckByLooseName(nm);
-      return d ? { deck: d } : { name: nm };
+      // Opened for one deck (its empty hub, 請 Claude 補例句): a section with that deck's name is
+      // that deck — also when another folder has a deck of the same name.
+      if (targetDeck && deckKey(nm) === deckKey(targetDeck.name) &&
+          (!fileFolder || deckKey(fileFolder) === deckKey(folderName(targetDeck.folderId)))) {
+        return { deck: targetDeck };
+      }
+      var d = importDeck(nm, fileFolder, chosenId);
+      return d ? { deck: d } : { name: nm, folder: fileFolder };
     }
 
     sources.forEach(function (src) {
@@ -2976,13 +3753,14 @@
       });
       (parsed.decks || []).forEach(function (sec) {
         var isDefault = sec.name === DEFAULT_SECTION;
+        var fileFolder = str(sec.folder).trim();
         var dest;
         if (isDefault) {
           if (needsName.indexOf(src.id) < 0) needsName.push(src.id);
           if (targetDeck) dest = { deck: targetDeck };
-          else dest = destByName(opts.names && opts.names[src.id] != null ? opts.names[src.id] : src.defaultDeckName);
+          else dest = destByName(opts.names && opts.names[src.id] != null ? opts.names[src.id] : src.defaultDeckName, fileFolder);
         } else {
-          dest = destByName(sec.name);
+          dest = destByName(sec.name, fileFolder);
         }
         var g = groupFor(dest, !isDefault);
         (sec.cards || []).forEach(function (c) {
@@ -3027,7 +3805,7 @@
       totals.merged += g.merged;
     });
     return { groups: list, errors: errors, totals: totals, needsName: needsName, dupMode: dupMode,
-      perSource: perSource, suspectEncoding: suspectEncoding };
+      perSource: perSource, suspectEncoding: suspectEncoding, folder: chosenId ? { id: chosenId } : chosenName ? { name: chosenName } : null };
   }
 
   /** Apply a plan. If the result cannot be saved (storage full), nothing changes: res.failed. */
@@ -3038,8 +3816,11 @@
         if (!g.adds.length && !g.updates.length) return;
         var deckId = g.deckId;
         if (!deckId || !deckById(deckId)) {
-          var existing = deckByLooseName(g.name);
-          deckId = existing ? existing.id : createDeck(g.name).id;
+          // A new deck: in the file's folder, else the chosen one (made now when it is new).
+          var folder = g.fileFolder ? folderForName(g.fileFolder)
+            : plan.folder && plan.folder.id ? folderById(plan.folder.id)
+            : plan.folder ? folderForName(plan.folder.name) : null;
+          deckId = createDeck(g.name, folder ? folder.id : null).id;
         }
         g.adds.forEach(function (f) { addCard(deckId, f); res.added++; });
         g.updates.forEach(function (u) {
@@ -3058,7 +3839,10 @@
 
   function currentImportOpts() {
     if (imp.target !== 'new' && !deckById(imp.target)) imp.target = 'new';
-    return { target: imp.target, names: imp.names, dupMode: imp.dupMode };
+    if (imp.folder && imp.folder !== 'new' && !folderById(imp.folder)) imp.folder = '';
+    if (imp.folder === 'new' && !imp.newFolder) imp.folder = '';
+    var folder = imp.folder === 'new' ? { name: imp.newFolder } : imp.folder ? { id: imp.folder } : null;
+    return { target: imp.target, names: imp.names, dupMode: imp.dupMode, folder: folder };
   }
 
   function handleImportFiles(files) {
@@ -3180,7 +3964,8 @@
     // Options (rebuilt only when their structure changes, so typing keeps focus)
     var sig = JSON.stringify([sources.length > 0, opts.target, plan.needsName,
       plan.groups.some(function (g) { return g.fromSection; }), plan.totals.dup > 0 || imp.dupMode === 'update',
-      state.decks.map(function (d) { return d.id + d.name; })]);
+      state.decks.map(function (d) { return d.id + d.name; }),
+      showImportFolder(sources, plan), imp.folder, imp.newFolder, state.folders.map(function (f) { return f.id + f.name; })]);
     if (sig !== impUI.optionsSig) {
       // A deck name typed so far may now match a deck with duplicates: keep the cursor in its box.
       var active = document.activeElement;
@@ -3199,10 +3984,55 @@
     impUI.confirmBtn.textContent = n ? '匯入 ' + fmtNum(n) + ' 張' : '匯入';
   }
 
+  /**
+   * 資料夾 is asked when the import makes a new deck that the file does not put in a folder
+   * itself — and before anything is chosen when the import was opened from a folder page.
+   */
+  function showImportFolder(sources, plan) {
+    if (!sources.length) return imp.askFolder;
+    return plan.groups.some(function (g) { return g.isNew && !g.fileFolder && g.adds.length; });
+  }
+
+  /** The 資料夾 select (#import-folder): 不放資料夾 / the folders / a new one being named / 新增資料夾…. */
+  function importFolderSelect() {
+    var sel = h('select', { id: 'import-folder', class: 'input' },
+      h('option', { value: '', text: '不放資料夾' }),
+      sortedFolders().map(function (f) { return h('option', { value: f.id, text: f.name }); }),
+      imp.newFolder ? h('option', { value: 'new', text: imp.newFolder + '（新資料夾）' }) : null,
+      h('option', { value: 'add', text: '新增資料夾…' }));
+    sel.value = imp.folder;
+    sel.addEventListener('change', function () {
+      if (sel.value !== 'add') { imp.folder = sel.value; refreshImport(); return; }
+      sel.value = imp.folder; // until a name is given
+      promptDialog({ title: '新增資料夾', message: '這次匯入的新牌組會放進這個資料夾。', placeholder: '資料夾名稱，例如：龍騰 B3',
+        okText: '確定', maxlength: 60 }).then(function (name) {
+        if (name === null) return;
+        var n = str(name).trim();
+        if (!n) { toast('請輸入資料夾名稱', 'error'); return; }
+        var existing = folderByLooseName(n);
+        if (existing) {
+          toast('已經有「' + existing.name + '」資料夾，新牌組會放進這裡');
+          imp.folder = existing.id;
+        } else {
+          imp.newFolder = n;
+          imp.folder = 'new';
+        }
+        impUI.optionsSig = null; // rebuild with the new option
+        refreshImport();
+      });
+    });
+    return sel;
+  }
+
   function buildImportOptions(sources, plan) {
     var box = impUI.options;
     clear(box);
-    if (!sources.length) return;
+    var folderField = showImportFolder(sources, plan)
+      ? field('資料夾', importFolderSelect(), '新的牌組會放進這個資料夾；已經有的牌組不會移動。') : null;
+    if (!sources.length) {
+      if (folderField) box.appendChild(h('div', { class: 'panel' }, folderField));
+      return;
+    }
 
     var sel = h('select', { id: 'import-target', class: 'input', 'aria-label': '匯入到' },
       h('option', { value: 'new', text: '新牌組' }));
@@ -3228,6 +4058,7 @@
         panel.appendChild(field(label, input));
       });
     }
+    append(panel, folderField);
     // Only when some words are already in the deck (where the words go is shown in the preview).
     if (plan.totals.dup > 0 || imp.dupMode === 'update') {
       panel.appendChild(field('牌組裡已經有的單字', segmented([
@@ -3274,7 +4105,10 @@
       groups.forEach(function (g) {
         var num = (g.adds.length + g.updates.length) + ' 張' + (g.dups ? '（重複 ' + g.dups + '）' : '');
         ul.appendChild(h('li', null,
-          h('span', { class: 'sec-name', text: g.name }),
+          h('span', { class: 'sec-main' },
+            h('span', { class: 'sec-name', text: g.name }),
+            g.folder ? h('span', { class: 'sec-folder' }, icon('folder'),
+              h('span', { text: g.folder + (folderByLooseName(g.folder) ? '' : '（新資料夾）') })) : null),
           h('span', { class: 'sec-tag', text: g.isNew ? '新牌組' : '加入現有' }),
           h('span', { class: 'sec-num', text: num })));
       });
@@ -3352,10 +4186,18 @@
     if (res.updated) msg += '，其中更新 ' + res.updated + ' 張';
     toast(msg);
     resetImport();
-    // One deck: straight to it (ready to study). Several: home, with the decks highlighted.
+    // One deck: straight to it (ready to study). Several: their folder when they are all in the
+    // same one, else home — with the decks highlighted.
     if (res.deckIds.length === 1) { goBackTo(deckHash(res.deckIds[0])); return; }
     flashDeckIds = res.deckIds.slice();
-    goHome();
+    var folderIds = [];
+    res.deckIds.forEach(function (id) {
+      var d = deckById(id);
+      var f = d ? d.folderId || '' : '';
+      if (folderIds.indexOf(f) < 0) folderIds.push(f);
+    });
+    if (folderIds.length === 1 && folderIds[0]) goBackTo(folderHash(folderIds[0]));
+    else goHome();
   }
 
   /** 「還沒有單字檔？」: copy the rules for Claude — the usual way to get a word file. */
@@ -3384,6 +4226,7 @@
         h('ul', null,
           h('li', { text: '只有「單字」和「中文意思」是必填，其他都可以省略。' }),
           h('li', { text: '#deck: 名稱 可以指定牌組，一個檔案可以放好幾個牌組。' }),
+          h('li', { text: '#folder: 名稱 寫在 #deck: 前面，後面的牌組就會放進這個資料夾。' }),
           h('li', { text: '# 開頭的其他行是註解，不會匯入。' }),
           h('li', { text: 'Excel、Quizlet、Anki 匯出的檔案，或從 AI 聊天複製的表格、清單，大多也能直接匯入。' })),
         copyBtn));
@@ -3478,7 +4321,8 @@
       var when = obj.exportedAt ? '\n備份時間：' + ymd(Date.parse(obj.exportedAt) || now()) : '';
       confirmDialog({
         title: '還原備份？',
-        message: '備份內有 ' + norm.decks.length + ' 個牌組、' + norm.cards.length + ' 張卡片。' +
+        message: '備份內有 ' + (norm.folders.length ? norm.folders.length + ' 個資料夾、' : '') +
+          norm.decks.length + ' 個牌組、' + norm.cards.length + ' 張卡片。' +
           (lost > 0 ? '（另有 ' + lost + ' 張資料不完整，會略過）' : '') + when +
           '\n\n目前所有的牌組與測驗紀錄都會被取代，無法復原。',
         okText: '還原', danger: true
@@ -3526,7 +4370,7 @@
       if (!ok) return;
       var prev = state;
       state = freshState();
-      state.prefs = prev.prefs;
+      state.prefs = Object.assign({}, prev.prefs, { quizSetup: Object.assign({}, prev.prefs.quizSetup, { deckIds: null }) });
       if (!flushSave({ quiet: true, replace: true })) {
         state = prev;
         toast(notSavedText('清除'), 'error', 7000);
@@ -3640,13 +4484,16 @@
   function render() {
     if (!VC) return;
     var r = currentRoute();
-    if (r.name !== 'quiz') stopQuizTimer();
-    if (r.name !== 'cards' && r.name !== 'quiz' && tts.supported) {
+    if (r.name !== 'quiz-run') stopQuizTimer();
+    if (r.name !== 'cards' && r.name !== 'quiz-run' && tts.supported) {
       try { window.speechSynthesis.cancel(); } catch (e) { /* ignore */ }
     }
+    updateTabBar(r.name);
     if (r.name === 'deck') renderHub(r.id);
+    else if (r.name === 'folder') renderFolder(r.id);
     else if (r.name === 'cards') renderCards(r.id);
-    else if (r.name === 'quiz') renderQuiz(r.id, r.mode);
+    else if (r.name === 'quiz') renderQuizPage(r);
+    else if (r.name === 'quiz-run') renderQuizRun();
     else if (r.name === 'browse') renderBrowse(r.id);
     else if (r.name === 'import') renderImport();
     else if (r.name === 'settings') renderSettings();
@@ -3658,7 +4505,7 @@
    * screen (re-drawing it would take the focus, and the phone keyboard, from the answer box).
    */
   function refreshForOtherTab() {
-    if (topOverlay() || (currentRoute().name === 'quiz' && currentQuestion())) return;
+    if (topOverlay() || (currentRoute().name === 'quiz-run' && currentQuestion())) return;
     render();
   }
 
@@ -3687,7 +4534,7 @@
     if (/^(INPUT|TEXTAREA|SELECT)$/.test(tag) || target.isContentEditable || e.altKey || e.ctrlKey || e.metaKey) return;
     var r = currentRoute();
     if (r.name === 'cards' && fc && fc.deckId === r.id) flashKey(e, tag);
-    else if (r.name === 'quiz' && quiz && quiz.deckId === r.id && quiz.mode === r.mode) quizKey(e, tag);
+    else if (r.name === 'quiz-run' && quiz) quizKey(e, tag);
   }
 
   /** Flashcards: ← → previous / next, Space / Enter flip, S speak. */
@@ -3883,7 +4730,7 @@
       var o = opts || {};
       var target = o.deckId && deckById(o.deckId) ? o.deckId : 'new';
       var res = runImport([{ id: 'api', name: o.fileName || 'text', defaultDeckName: o.deckName || '我的單字', text: str(text) }],
-        { target: target, names: {}, dupMode: o.dupMode });
+        { target: target, names: {}, dupMode: o.dupMode, folder: o.folderId && folderById(o.folderId) ? { id: o.folderId } : null });
       flushSave();
       render();
       return res;

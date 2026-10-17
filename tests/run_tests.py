@@ -39,7 +39,7 @@ VIRTUAL_TIME_BUDGET = 20000  # ms of virtual time per page
 # The end-to-end page drives the real UI (animations, debounced saves, history.back()).
 # Virtual time only advances while the page waits, so a big budget costs little real time.
 PAGE_BUDGETS = {"e2e.html": 240000}
-PAGE_TIMEOUTS = {"e2e.html": 240}
+PAGE_TIMEOUTS = {"e2e.html": 420}  # ~80 s of virtual time; real time varies a lot with the machine's load
 RESULT_RE = re.compile(r"RESULT:\s*PASS\s+(\d+)\s+FAIL\s+(\d+)")
 MAX_DETAIL_LINES = 120
 

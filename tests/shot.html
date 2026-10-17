@@ -51,6 +51,16 @@
     'scenery | /ˈsinəri/ | n. 風景 | The scenery here is breathtaking. | 這裡的風景美得令人屏息。',
   ].join('\n');
 
+  const UNIT4 = [
+    '#deck: 英文課本 Unit 4',
+    'ambition | /æmˈbɪʃən/ | n. 抱負；志向 | Her ambition is to become a doctor. | 她的志向是當醫生。',
+    'brilliant | /ˈbrɪljənt/ | adj. 傑出的；聰明的 | That\'s a brilliant idea! | 那真是個好主意！',
+    'curious | /ˈkjʊriəs/ | adj. 好奇的 | Children are curious about everything. | 小孩對什麼都好奇。',
+    'dedicate | /ˈdɛdəˌkeɪt/ | v. 奉獻；致力於 | She dedicated her life to music. | 她把一生奉獻給音樂。',
+    'take part in | phr. 參加 | Our class will take part in the contest. | 我們班會參加比賽。',
+    'look forward to | phr. 期待 | I look forward to the trip. | 我很期待這趟旅行。',
+  ].join('\n');
+
   const TOEIC = [
     '#deck: 多益核心單字',
     'agenda | /əˈdʒɛndə/ | n. 議程 | What\'s on the agenda for today\'s meeting? | 今天會議的議程是什麼？',
@@ -116,6 +126,27 @@
     'abandon | v. 拋棄；放棄',
     'flexible | /ˈflɛksəbəl/ | adj. 有彈性的',
     'this line has no meaning',
+  ].join('\n');
+
+  // Pasted on a folder page: no #deck, so the deck name is asked; the folder is chosen already.
+  const UNIT5 = [
+    'environment | /ɪnˈvaɪrənmənt/ | n. 環境 | We must protect the environment. | 我們必須保護環境。',
+    'pollution | /pəˈluʃən/ | n. 汙染 | Air pollution is a serious problem. | 空氣汙染是個嚴重的問題。',
+    'recycle | /riˈsaɪkəl/ | v. 回收 | We recycle paper and bottles. | 我們回收紙和瓶子。',
+    'reduce | /rɪˈdus/ | v. 減少 | We should reduce waste. | 我們應該減少浪費。',
+  ].join('\n');
+
+  // One file, two folders (a textbook per folder, a deck per lesson).
+  const BOOKS = [
+    '#folder: 龍騰英文 第三冊',
+    '#deck: B3 L5',
+    'inspire | /ɪnˈspaɪr/ | v. 激勵 | Her story inspired many people. | 她的故事激勵了許多人。',
+    'volunteer | /ˌvɑlənˈtɪr/ | n. 志工 | He volunteers every weekend. | 他每個週末當志工。',
+    '#deck: B3 L6',
+    'ancient | /ˈeɪnʃənt/ | adj. 古老的 | We visited an ancient temple. | 我們參觀了一座古廟。',
+    '#folder: 龍騰英文 第四冊',
+    '#deck: B4 L1',
+    'reduce | /rɪˈdus/ | v. 減少 | We should reduce waste. | 我們應該減少浪費。',
   ].join('\n');
 
   const CHAT = [
@@ -191,7 +222,7 @@
   const SAMPLE = () => W().VC_SAMPLE.name;
   const cardsOf = (s, d) => s.cards.filter((c) => c.deckId === d.id).sort((a, b) => a.seq - b.seq);
 
-  /** Three decks: the sample (at card 12, both quizzes done, a few wrong answers), Unit 3, TOEIC. */
+  /** Three decks: the sample (at card 12, a few quizzes done, some wrong answers), Unit 3, TOEIC. */
   function seedRich(theme) {
     const app = W().VCApp;
     app.importText(W().VC_SAMPLE.text, { deckName: SAMPLE() });
@@ -200,12 +231,33 @@
     const s = S();
     const sample = s.decks[0];
     sample.flash.index = 11;
-    sample.lastQuiz = { choice: { score: 8, total: 10, at: T - DAY }, spell: { score: 6, total: 10, at: T - 3 * HOUR } };
-    s.decks[1].lastQuiz = { choice: { score: 7, total: 8, at: T - 2 * DAY } };
+    s.quizHistory = [
+      { mode: 'spell', deckIds: [sample.id], score: 6, total: 10, at: T - 3 * HOUR },
+      { mode: 'choice', deckIds: [sample.id, s.decks[1].id, s.decks[2].id], score: 18, total: 20, at: T - DAY },
+      { mode: 'choice', deckIds: [s.decks[1].id], score: 7, total: 8, at: T - 2 * DAY },
+    ];
     const sc = cardsOf(s, sample);
     sc.slice(0, 20).forEach((c, i) => { c.right = 1 + (i % 3); });
     [[1, 2], [4, 1], [7, 3], [12, 1]].forEach((p) => { sc[p[0]].wrong = p[1]; });
     if (theme) s.prefs.theme = theme;
+    app.setState(s);
+  }
+
+  /**
+   * seedRich, organised: folder 英文課本 第三冊 (Unit 3, Unit 4), folder 多益 (TOEIC); the sample
+   * deck and 我的單字 outside any folder.
+   */
+  function seedFolders(theme) {
+    seedRich(theme);
+    const app = W().VCApp;
+    app.importText(UNIT4, {});
+    app.importText(MINE, {});
+    const s = S();
+    s.folders = [{ id: 'book3', name: '英文課本 第三冊', created: T - 5 * DAY }, { id: 'toeic', name: '多益', created: T - 4 * DAY }];
+    s.decks.forEach((d) => {
+      if (d.name === '英文課本 Unit 3' || d.name === '英文課本 Unit 4') d.folderId = 'book3';
+      if (d.name === '多益核心單字') d.folderId = 'toeic';
+    });
     app.setState(s);
   }
 
@@ -226,10 +278,24 @@
     await screenIs('cards');
   }
 
+  /** The deck's hub → 測驗 (the quiz page with that deck chosen) → kind → 開始測驗. */
   async function openQuiz(name, mode) {
     await openHub(name);
-    click(mode === 'choice' ? 'hub-choice' : 'hub-spell');
+    click('hub-quiz');
+    await screenIs('quiz-setup');
+    click('quiz-mode-' + mode);
+    click('quiz-start');
     await screenIs('quiz');
+  }
+
+  async function openFolder(id) {
+    click($('[data-action="folder-open"][data-folder-id="' + id + '"]'));
+    await screenIs('folder');
+  }
+
+  async function openQuizPage() {
+    click('tab-quiz');
+    await screenIs('quiz-setup');
   }
 
   async function browseDeck(name) {
@@ -311,15 +377,45 @@
       await waitFor(() => $('.overlay[data-overlay="modal"]'), 'modal');
     },
 
+    // Folders
+    'home-folders': async () => { seedFolders(); },
+    'home-folders-dark': async () => { seedFolders('dark'); },
+    'folder-page': async () => { seedFolders(); await openFolder('book3'); },
+    'folder-page-dark': async () => { seedFolders('dark'); await openFolder('book3'); },
+    'folder-empty': async () => {
+      seedFolders();
+      const s = S();
+      s.folders.push({ id: 'new1', name: '學測衝刺', created: T });
+      W().VCApp.setState(s);
+      await openFolder('new1');
+    },
+    'folder-menu': async () => {
+      seedFolders();
+      await openFolder('book3');
+      await openSheet('folder-menu');
+    },
+    'move-sheet': async () => {
+      seedFolders();
+      click($('[data-action="deck-menu"][data-deck-id="' + deckId('我的單字') + '"]'));
+      await waitFor(() => act('deck-move'), 'deck menu');
+      await sleep(80);
+      click('deck-move');
+      await waitFor(() => $('.overlay[data-overlay="sheet"]:not(.closing) [data-action="move-to-folder"]'), 'move sheet');
+    },
+    'new-folder': async () => {
+      seedFolders();
+      click('new-folder');
+      await waitFor(() => $('.overlay[data-overlay="modal"]'), 'prompt');
+      await sleep(80); // after the dialog selected its (empty) text
+      setValue($('#modal-input'), '龍騰英文 第四冊');
+    },
+
     // Deck hub
     'hub': async () => { seedRich(); await openHub(SAMPLE()); },
     'hub-dark': async () => { seedRich('dark'); await openHub(SAMPLE()); },
     'hub-small': async () => {
       seedRich();
       W().VCApp.importText(MINE, {});
-      const s = S();
-      s.decks.find((d) => d.name === '我的單字').lastQuiz = { choice: { score: 5, total: 6, at: T - DAY } };
-      W().VCApp.setState(s);
       await openHub('我的單字');
     },
     'hub-nospell': async () => {
@@ -408,11 +504,53 @@
     },
     'quiz-spell-wrong': async () => { await spellWrong(); },
     'quiz-spell-wrong-dark': async () => { await spellWrong('dark'); },
-    'quiz-empty': async () => {
-      W().VCApp.importText(NO_EXAMPLES, {});
-      W().location.hash = '#/quiz/' + encodeURIComponent(deckId('不規則動詞')) + '/spell';
-      await screenIs('quiz');
+
+    // Quiz page (#/quiz)
+    'quiz-setup': async () => { seedFolders(); await openQuizPage(); },
+    'quiz-setup-dark': async () => { seedFolders('dark'); await openQuizPage(); },
+    'quiz-setup-bottom': async () => {
+      seedFolders();
+      await openQuizPage();
+      D().scrollingElement.scrollTop = D().scrollingElement.scrollHeight;
     },
+    'quiz-setup-spell': async () => {
+      // 拼字題: decks that can ask fewer words say how many; decks with none are greyed.
+      seedFolders();
+      W().VCApp.importText(NO_EXAMPLES, {});
+      W().VCApp.importText(NOTES, {});
+      await openQuizPage();
+      click('quiz-mode-spell');
+      const top = $('.pick-label').getBoundingClientRect().top + D().scrollingElement.scrollTop;
+      D().scrollingElement.scrollTop = top - 330;
+    },
+    'quiz-setup-partial': async () => {
+      // A folder partly chosen (–), a folder not chosen, 全選.
+      seedFolders();
+      await openQuizPage();
+      click('quiz-none');
+      click($('[data-action="quiz-deck"][data-deck-id="' + deckId('英文課本 Unit 4') + '"]'));
+      click($('[data-action="quiz-deck"][data-deck-id="' + deckId('我的單字') + '"]'));
+    },
+    'quiz-setup-none': async () => {
+      // Nothing chosen: 開始測驗 disabled, the summary says why.
+      seedFolders();
+      await openQuizPage();
+      click('quiz-none');
+    },
+    'quiz-setup-resume': async () => {
+      // Left half-way with the back gesture: 「繼續第 N 題」 on top.
+      seedFolders();
+      await openQuiz(SAMPLE(), 'choice');
+      await answerChoice(true);
+      click('quiz-next');
+      await sleep(10);
+      await answerChoice(false);
+      click('quiz-next');
+      await sleep(10);
+      W().history.back();
+      await screenIs('quiz-setup');
+    },
+    'quiz-setup-empty': async () => { await openQuizPage(); },
 
     // Results
     'quiz-results': async () => { await choiceResults(); },
@@ -427,6 +565,24 @@
         await sleep(10);
       }
       await waitFor(() => $('#quiz-results'), 'results');
+    },
+
+    'quiz-results-multi': async () => {
+      // Several decks: each wrong word says which deck it is from.
+      seedFolders();
+      await openQuizPage();
+      click('quiz-mode-choice');
+      click('quiz-count-20');
+      click('quiz-start');
+      await screenIs('quiz');
+      for (let i = 0; i < 20; i++) {
+        await answerChoice(i % 5 !== 1);
+        click('quiz-next');
+        await sleep(10);
+      }
+      await waitFor(() => $('#quiz-results'), 'results');
+      const top = $('.results-actions').getBoundingClientRect().top + D().scrollingElement.scrollTop;
+      D().scrollingElement.scrollTop = top - 70;
     },
 
     // Browse / edit
@@ -471,6 +627,26 @@
       click('open-import');
       await screenIs('import');
       setValue($('#import-text'), CHAT);
+      const top = $('.or-line').getBoundingClientRect().top + D().scrollingElement.scrollTop;
+      D().scrollingElement.scrollTop = top - 64;
+    },
+    'import-folder': async () => {
+      // 匯入單字 on a folder page: 資料夾 chosen; the preview says where the deck goes.
+      seedFolders();
+      await openFolder('book3');
+      click('folder-import');
+      await screenIs('import');
+      setValue($('#import-text'), UNIT5);
+      setValue($('.import-deck-name'), '英文課本 Unit 5');
+      const top = $('.or-line').getBoundingClientRect().top + D().scrollingElement.scrollTop;
+      D().scrollingElement.scrollTop = top - 64;
+    },
+    'import-folders-file': async () => {
+      // A file with #folder: lines (two folders).
+      seedFolders();
+      click('open-import');
+      await screenIs('import');
+      setValue($('#import-text'), BOOKS);
       const top = $('.or-line').getBoundingClientRect().top + D().scrollingElement.scrollTop;
       D().scrollingElement.scrollTop = top - 64;
     },

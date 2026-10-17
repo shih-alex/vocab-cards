@@ -1,10 +1,10 @@
 /*
  * 單字卡 core — pure logic shared by the app and the tests. No DOM access.
- *   - text-file format:  parseDeckText / serializeDeck / decodeBytes / normalizeWord
+ *   - text-file format:  parseDeckText / serializeDeck (#folder: and #deck: lines) / decodeBytes / normalizeWord
  *   - cards:             newCard
  *   - headwords:         wordForms / headwordRegex / findHeadwords / findHeadword  (the word inside its
- *                        example sentence) / speakableWord
- *   - spelling quiz:     maskWord / makeCloze / checkSpelling / isOtherForm
+ *                        example sentence) / speakableWord / isPhrase
+ *   - spelling quiz:     maskWord / makeCloze (single words only) / checkSpelling / isOtherForm
  *   - choice quiz:       quizMeaning / posOf / meaningKey / pickChoices
  *   - quizzes:           buildQuiz / quizEligible, with shuffle / seededRng / seededOrder for random order
  * Loads as a classic <script> (window.VC) and as a CommonJS module (module.exports).
@@ -35,6 +35,8 @@
   const CJK_RE = /[㐀-鿿豈-﫿]/;
   // "#deck: 名稱" — also full-width ＃ and ：, any case.
   const DECK_RE = /^[#＃]\s*deck\s*[:：]\s*([\s\S]*)$/i;
+  // "#folder: 名稱" — the same rules; puts the following #deck: sections in a folder ('' = none).
+  const FOLDER_RE = /^[#＃]\s*folder\s*[:：]\s*([\s\S]*)$/i;
   // Anki "Notes in Plain Text" headers that describe extra columns / the separator.
   const ANKI_COLUMN_RE = /^#\s*(tags|guid|notetype|deck)\s+column\s*:\s*(\d+)\s*$/i;
   const ANKI_SEPARATOR_RE = /^#\s*separator\s*:\s*(\S+)\s*$/i;
@@ -407,6 +409,11 @@
    * Returns { decks, errors }. When the text has a ``` / ~~~ code block with cards in it (a whole
    * AI chat reply was copied), only the block is read: the result also has skipped = the line
    * numbers of the chat text around it, which is neither imported nor reported as an error.
+   *   decks:  [{ name, folder, cards }] in file order; folder = the "#folder: 名稱" in effect for the
+   *           section ('' = none). A "#folder:" line holds for the following "#deck:" sections until
+   *           the next one (an empty "#folder:" = none again); written before any card of the current
+   *           section (e.g. at the top of a file without "#deck:"), it holds for that section too.
+   *           The same name in two folders is two decks.
    */
   function parseDeckText(text, opts) {
     const lines = str(text).replace(/^﻿/, '').split(/\r\n|\r|\n/);
@@ -439,6 +446,9 @@
     const errors = [];
     const skipped = [];
     let sectionName = defaultName;
+    let folder = '';          // the "#folder:" in effect
+    let sectionFolder = '';   // the folder of the current section
+    let sectionCards = false; // the current section has a card already
     let atSectionStart = true;
     let delim = opts && opts.csv ? ',' : ''; // '' = TAB when the line has one, else "|"
     const anki = { drop: [], deckCol: 0 };   // columns described by Anki "#… column:N" headers
@@ -459,7 +469,12 @@
         let m;
         if (deckLine) {
           sectionName = oneLine(deckLine[1]) || defaultName;
+          sectionFolder = folder;
+          sectionCards = false;
           atSectionStart = true;
+        } else if ((m = FOLDER_RE.exec(trimmed))) {
+          folder = oneLine(m[1]);
+          if (!sectionCards) sectionFolder = folder;
         } else if ((m = ANKI_COLUMN_RE.exec(trimmed))) {
           const col = Number(m[2]);
           if (m[1].toLowerCase() === 'deck') anki.deckCol = col;
@@ -537,13 +552,15 @@
         continue;
       }
       result.card.line = first + 1;
-      let deck = byName.get(name);
+      const key = sectionFolder + '\n' + name; // names are one line
+      let deck = byName.get(key);
       if (!deck) {
-        deck = { name: name, cards: [] };
-        byName.set(name, deck);
+        deck = { name: name, folder: sectionFolder, cards: [] };
+        byName.set(key, deck);
         decks.push(deck);
       }
       deck.cards.push(result.card);
+      sectionCards = true;
     }
     return only ? { decks: decks, errors: errors, skipped: skipped } : { decks: decks, errors: errors };
   }
@@ -587,9 +604,12 @@
     return out.join(' | ');
   }
 
-  function serializeDeck(name, cards) {
+  // One deck as a text file; with folderName, a "#folder:" line goes before the "#deck:" line.
+  function serializeDeck(name, cards, folderName) {
     const list = Array.isArray(cards) ? cards : [];
-    const lines = ['#deck: ' + oneLine(name)];
+    const folder = oneLine(folderName);
+    const lines = folder ? ['#folder: ' + folder] : [];
+    lines.push('#deck: ' + oneLine(name));
     // A first word like "term" could be taken for a column header on import — add a real header.
     if (list.length && isHeaderWord(normField(list[0] && list[0].word))) lines.push(HEADER_LINE);
     for (let i = 0; i < list.length; i++) lines.push(serializeCard(list[i]));
@@ -824,7 +844,28 @@
   }
 
   // { re, first }: the RegExp of headwordRegex and the first word of the headword.
+  // Pattern sources by word: building one (wordForms + escaping) is the slow part of makeCloze on
+  // big decks, so each word is built once. A fresh RegExp is still returned (it is stateful: 'g').
+  const patternCache = new Map();
+  const PATTERN_CACHE_MAX = 20000;
+
   function headwordPattern(word) {
+    const key = str(word);
+    let entry = patternCache.get(key);
+    if (entry === undefined) {
+      entry = buildHeadwordPattern(key);
+      if (patternCache.size >= PATTERN_CACHE_MAX) patternCache.clear();
+      patternCache.set(key, entry);
+    }
+    if (!entry) return null;
+    try {
+      return { re: new RegExp(entry.source, 'gi'), first: entry.first };
+    } catch (e) {
+      return null;
+    }
+  }
+
+  function buildHeadwordPattern(word) {
     const tokens = headwordTokens(word);
     if (!tokens) return null;
     const first = tokens[0].text;
@@ -838,10 +879,11 @@
     }
     const source = '(^|[^' + WORD_CHARS + '])((' + forms.join('|') + ')' + rest + ')(?![' + WORD_CHARS + '])';
     try {
-      return { re: new RegExp(source, 'gi'), first: first };
+      new RegExp(source, 'gi'); // validate once; an invalid pattern is cached as null
     } catch (e) {
       return null;
     }
+    return { source: source, first: first };
   }
 
   /**
@@ -943,6 +985,41 @@
     return t || src;
   }
 
+  // A word that is only a part of speech: "v.", "n./v.", "adj.".
+  const POS_WORD_RE = new RegExp('^' + POS_UNIT + '$', 'i');
+  // Stand-ins as alternatives of each other ("keep sb/sth from V-ing") are one stand-in, not two headwords.
+  const STAND_IN_ALTS_RE = /(^|[^A-Za-z])((?:sb|sth|somebody|someone|something)(?:['’]s)?)(?:\s*[\/／]\s*(?:sb|sth|somebody|someone|something)(?:['’]s)?)+(?![A-Za-z'’])/gi;
+
+  /**
+   * True when the headword is two or more words — a phrase, which the spelling quiz leaves out:
+   * "give up", "look forward to + V-ing", "remind sb of sth", "be aware of", "make up one's mind".
+   * Brackets ("abandon (v.)", "(the) Internet"), a part of speech ("abandon v."), the alternatives
+   * after the first ("color / colour"), a grammar pattern after "+", stand-ins (sb, sth, A … B, "…",
+   * V-ing; someone / something only after a word: "tell someone") and Chinese do not count, so
+   * "abandon sth" is one word; so are "well-being", "o'clock" and "U.S.".
+   */
+  function isPhrase(word) {
+    const raw = foldAccents(word)
+      .replace(BRACKETS_RE, ' ')
+      .replace(PATTERN_TAIL_RE, '')
+      .replace(STAND_IN_ALTS_RE, '$1$2')
+      .split(ALTERNATIVES_RE)[0]
+      .replace(ELLIPSIS_RE, ' … ')
+      .split(/\s+/).filter(Boolean);
+    let words = 0;
+    let letters = 0;
+    for (let i = 0; i < raw.length; i++) {
+      const t = raw[i];
+      const key = t.toLowerCase().replace(/’/g, "'").replace(/\.$/, '');
+      // As in headwordTokens: someone / something is a word at the start or after a short word ("or something").
+      if (isPlaceholder(raw, i, key) && (!SOFT_PLACEHOLDERS.has(key) || letters >= 3)) continue;
+      if (!HAS_WORD_CHAR_RE.test(t) || POS_WORD_RE.test(t)) continue;
+      if (++words > 1) return true;
+      letters += t.replace(NOT_LETTER_RE, '').length;
+    }
+    return false;
+  }
+
   /* ---------------------------------------------------------- spelling quiz */
 
   /**
@@ -966,13 +1043,17 @@
    * The spelling question of a card: its example sentence split around the headword (findHeadword)
    * — { before, answer, after, masked, hidden, beforeMasked, afterMasked } with before + answer +
    * after = example; beforeMasked / afterMasked are before / after with every other occurrence of the
-   * headword masked too ("Practice makes perfect, so p______e every day.") — or null when there is no
-   * example, the word is not in it, or nothing would be hidden.
+   * headword masked too ("Practice makes perfect, so p______e every day.") — or null when the word is
+   * a phrase (isPhrase: the spelling quiz asks single words only), there is no example, the word is
+   * not in it, or nothing would be hidden.
    */
   function makeCloze(card) {
+    const word = card && card.word;
+    if (isPhrase(word)) return null;
     const example = str(card && card.example);
-    const hits = findHeadwords(example, card && card.word);
-    const hit = bestHit(hits);
+    const hits = findHeadwords(example, word);
+    // Never more than one word, also with a word in brackets: "abandon (oneself)" in "He abandoned himself".
+    const hit = bestHit(hits.filter(function (x) { return !/\s/.test(x.text); }));
     if (!hit) return null;
     const mask = maskWord(hit.text);
     if (!mask.hidden) return null;
@@ -1200,7 +1281,7 @@
    *   'choice' → { cardId, mode, word, phonetic, options, answerIndex }: pickChoices(card, pool || cards);
    *              a card needs at least one other distinct meaning (2+ options).
    *   'spell'  → { cardId, mode, cloze, hint }: cloze = makeCloze(card), hint = exampleZh or else
-   *              the quizMeaning.
+   *              the quizMeaning; phrases (isPhrase) and cards whose example lacks the word are skipped.
    */
   function buildQuiz(cards, mode, count, rng, pool) {
     if (mode !== 'choice' && mode !== 'spell') throw new RangeError("mode must be 'choice' or 'spell'");
@@ -1225,7 +1306,8 @@
     return out;
   }
 
-  // How many questions buildQuiz(cards, mode, 0, rng, pool) makes in each mode: { choice, spell }.
+  // How many questions buildQuiz(cards, mode, 0, rng, pool) makes in each mode: { choice, spell }
+  // (spell never counts a phrase).
   function quizEligible(cards, pool) {
     const list = Array.isArray(cards) ? cards.filter(Boolean) : [];
     const from = Array.isArray(pool) ? pool : list;
@@ -1241,7 +1323,7 @@
   /* ----------------------------------------------------------------- export */
 
   const VC = {
-    version: '2.1', // must equal APP_VERSION in app.js and VERSION in sw.js (detects a stale cached core.js)
+    version: '3.0', // must equal APP_VERSION in app.js and VERSION in sw.js (detects a stale cached core.js)
     DEFAULT_DECK_SETTINGS: DEFAULT_DECK_SETTINGS,
     parseDeckText: parseDeckText,
     serializeDeck: serializeDeck,
@@ -1254,6 +1336,7 @@
     findHeadwords: findHeadwords,
     findHeadword: findHeadword,
     speakableWord: speakableWord,
+    isPhrase: isPhrase,
     maskWord: maskWord,
     makeCloze: makeCloze,
     checkSpelling: checkSpelling,

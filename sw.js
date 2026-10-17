@@ -13,8 +13,8 @@
  */
 'use strict';
 
-const VERSION = '2.1';
-const CACHE = 'vocabcards-v5';
+const VERSION = '3.0';
+const CACHE = 'vocabcards-v6';
 
 const SHELL = [
   './',

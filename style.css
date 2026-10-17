@@ -40,6 +40,7 @@
   --pad: 20px;
   --col: 560px;
   --radius: 18px;
+  --tabbar-h: 56px;
   --safe-top: env(safe-area-inset-top, 0px);
   --safe-bottom: env(safe-area-inset-bottom, 0px);
   --safe-left: env(safe-area-inset-left, 0px);
@@ -226,10 +227,57 @@ svg { display: block; flex: none; }
 .bottombar:empty { display: none; }
 .bottombar .btn { flex: 1; }
 
+/* Bottom tab bar (牌組 · 測驗) on the top-level screens; their bottom bar sits right above it. */
+.tabbar {
+  position: fixed;
+  left: 50%;
+  bottom: 0;
+  z-index: 30;
+  display: flex;
+  width: 100%;
+  max-width: var(--col);
+  padding: 0 var(--safe-right) var(--safe-bottom) var(--safe-left);
+  transform: translateX(-50%);
+  border-top: 1px solid var(--line);
+  background: var(--bg); /* solid: the list scrolling behind it would tint a see-through bar */
+}
+
+.tab {
+  -webkit-appearance: none;
+  appearance: none;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 2px;
+  height: var(--tabbar-h);
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--muted);
+  font-size: 11.5px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  cursor: pointer;
+  transition: color 0.15s ease;
+}
+
+.tab svg { width: 25px; height: 25px; transition: transform 0.12s ease; }
+.tab:active svg { transform: scale(0.9); }
+.tab[aria-current="page"] { color: var(--accent); }
+
+body.has-tabbar .bottombar { bottom: calc(var(--tabbar-h) + var(--safe-bottom)); padding-bottom: 12px; }
+body.has-tabbar .content { padding-bottom: calc(100px + var(--tabbar-h) + var(--safe-bottom)); }
+body.has-tabbar .content.no-bottombar { padding-bottom: calc(32px + var(--tabbar-h) + var(--safe-bottom)); }
+body.has-tabbar .content.quiz-setup { padding-bottom: calc(150px + var(--tabbar-h) + var(--safe-bottom)); }
+body.has-tabbar #toasts { bottom: calc(176px + var(--safe-bottom)); }
+
 /* Phones: while typing in the page (paste box, search), the keyboard is up; a bar lifted above
    it (Android, interactive-widget=resizes-content) would only cover the text being typed. */
 @media (hover: none) and (pointer: coarse) {
-  body:has(.screen input:focus, .screen textarea:focus) .bottombar { display: none; }
+  body:has(.screen input:focus, .screen textarea:focus) .bottombar,
+  body:has(.screen input:focus, .screen textarea:focus) .tabbar { display: none; }
 }
 
 /* ---------- Buttons ---------- */
@@ -386,10 +434,25 @@ svg { display: block; flex: none; }
 }
 
 .deck-total { flex: none; white-space: nowrap; }
-.deck-scores { flex: none; white-space: nowrap; }
-.deck-scores::before { content: "·"; margin-right: 0.35em; }
 
 .deck-more { position: absolute; top: 6px; right: 6px; color: var(--muted); }
+
+/* Folder rows (home): the folder icon on the left, then name and 「3 個牌組 · 98 字」 */
+.folder-open { display: flex; align-items: center; gap: 14px; padding-left: 14px; }
+.folder-text { flex: 1; min-width: 0; }
+
+.folder-icon {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 44px;
+  height: 44px;
+  border-radius: 13px;
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.folder-icon svg { width: 24px; height: 24px; }
 
 /* Home notice (iPhone tip, backup reminder, storage problems) */
 .notice {
@@ -411,7 +474,7 @@ svg { display: block; flex: none; }
 .empty-claude + .empty-restore { margin-top: 2px; }
 .empty .empty-ios { max-width: 320px; margin: 18px 0 0; font-size: 13px; line-height: 1.6; }
 
-.list-foot { display: flex; justify-content: center; margin-top: 8px; }
+.list-foot { display: flex; flex-wrap: wrap; justify-content: center; gap: 0 20px; margin-top: 8px; }
 
 /* Empty state */
 .empty {
@@ -488,9 +551,9 @@ svg { display: block; flex: none; }
 .tile-text { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 3px; }
 .tile-head { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 10px; }
 .tile-title { margin-right: auto; font-size: 18px; font-weight: 650; line-height: 1.3; }
-.tile-desc { color: var(--muted); font-size: 13.5px; line-height: 1.45; }
+.tile-desc { color: var(--muted); font-size: 13.5px; line-height: 1.45; text-wrap: pretty; }
 
-/* 「看到第 12 張」 / 「上次 8/10」 / 「可出 32 題」, on the title's line */
+/* 「看到第 12 張」, on the title's line */
 .tile-meta {
   display: flex;
   align-items: center;
@@ -502,14 +565,6 @@ svg { display: block; flex: none; }
   line-height: 1.3;
   white-space: nowrap;
   font-variant-numeric: tabular-nums;
-}
-
-.tile-meta .meta-score {
-  padding: 2px 9px;
-  border-radius: 999px;
-  background: var(--accent-soft);
-  color: var(--accent);
-  font-weight: 600;
 }
 
 .tile-chev { width: 18px; height: 18px; margin-left: -4px; color: var(--faint); }
@@ -527,10 +582,145 @@ svg { display: block; flex: none; }
 
 .hub-more { margin-top: 18px; }
 .hub-more .set-row { min-height: 58px; }
-.seg.quiz-seg { flex: none; }
-.seg.quiz-seg button { flex: 1 1 0; min-width: 50px; min-height: 44px; padding: 0 10px; font-variant-numeric: tabular-nums; }
-.quiz-count-fixed { flex: none; color: var(--muted); font-size: 15px; font-weight: 600; font-variant-numeric: tabular-nums; }
-.hub-empty { padding-top: 5vh; }
+.hub-empty, .folder-empty { padding-top: 5vh; }
+
+/* Folder page: 匯入單字 takes its own width, 測驗這個資料夾 the rest */
+.folder-bar .btn-secondary { flex: none; padding: 0 18px; }
+
+/* ---------- Quiz page (#/quiz) ---------- */
+.section-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin: 22px 0 8px 4px; }
+.section-head .section-title { margin: 0; }
+.section-link { min-height: 40px; padding: 0 2px; color: var(--accent); font-weight: 600; }
+
+/* 「繼續第 N 題」 above the form */
+.resume-tile { min-height: 76px; margin-top: 10px; box-shadow: inset 0 0 0 1.5px var(--accent-soft), var(--shadow); }
+.resume-tile .tile-icon { width: 44px; height: 44px; border-radius: 13px; background: var(--accent); color: var(--on-accent); }
+.resume-tile .tile-icon svg { width: 22px; height: 22px; }
+.resume-tile .tile-title { font-size: 17px; }
+
+/* 題型: two big choices side by side */
+.mode-seg { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+
+.mode-opt {
+  -webkit-appearance: none;
+  appearance: none;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  justify-content: center;
+  gap: 4px;
+  min-height: 80px;
+  padding: 12px 14px;
+  border: 1.5px solid transparent;
+  border-radius: 18px;
+  background: var(--surface);
+  box-shadow: var(--shadow);
+  color: var(--ink);
+  text-align: left;
+  cursor: pointer;
+  transition: transform 0.12s ease, background-color 0.15s ease, border-color 0.15s ease;
+}
+
+.mode-opt:active { transform: scale(0.985); }
+.mo-head { display: flex; align-items: center; gap: 8px; font-size: 17px; font-weight: 650; line-height: 1.3; }
+.mo-head svg { width: 22px; height: 22px; color: var(--muted); }
+.mo-desc { color: var(--muted); font-size: 13px; line-height: 1.4; }
+.mode-opt[aria-pressed="true"] { border-color: var(--accent); background: var(--accent-soft); box-shadow: none; }
+.mode-opt[aria-pressed="true"] .mo-head, .mode-opt[aria-pressed="true"] .mo-head svg { color: var(--accent); }
+
+/* 選擇牌組: a card per folder (its rows inside), then 未分類 */
+.pick-group + .pick-group { margin-top: 10px; }
+.pick-label { margin: 18px 4px 8px; color: var(--muted); font-size: 13px; font-weight: 600; }
+
+.pick-row {
+  -webkit-appearance: none;
+  appearance: none;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  min-height: 60px;
+  padding: 9px 16px;
+  border: 0;
+  background: none;
+  color: var(--ink);
+  text-align: left;
+  cursor: pointer;
+}
+
+.pick-row:active { background: var(--surface-2); }
+.pick-group > .pick-row + .pick-row, .pick-folder + .pick-row { border-top: 1px solid var(--line); }
+/* Decks of a folder: their checkbox under the folder's icon */
+.pick-row.in-folder { padding-left: 50px; }
+.pick-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px; }
+
+.pick-name {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
+  font-size: 16px;
+  font-weight: 600;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+
+.pick-meta { color: var(--muted); font-size: 13px; line-height: 1.4; font-variant-numeric: tabular-nums; }
+.pick-row.dim .pick-main { opacity: 0.5; }
+
+.pick-folder { display: flex; align-items: stretch; }
+.pick-folder .pick-row { flex: 1; min-width: 0; min-height: 64px; padding-right: 4px; }
+.pick-ficon { flex: none; display: grid; place-items: center; width: 34px; height: 34px; margin-left: -2px; border-radius: 10px; background: var(--accent-soft); color: var(--accent); }
+.pick-ficon svg { width: 20px; height: 20px; }
+.pick-toggle { align-self: center; width: 48px; height: 48px; margin-right: 4px; }
+.pick-toggle svg { width: 20px; height: 20px; transition: transform 0.18s ease; }
+.pick-group.open .pick-toggle svg { transform: rotate(90deg); }
+
+/* The checkbox look (the whole row is the control): ✓ chosen, – some of a folder's decks */
+.check {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  border: 2px solid var(--faint);
+  border-radius: 7px;
+  color: var(--on-accent);
+  transition: background-color 0.15s ease, border-color 0.15s ease;
+}
+
+.check svg { width: 16px; height: 16px; stroke-width: 3; }
+[aria-checked="true"] > .check, [aria-checked="mixed"] > .check { border-color: var(--accent); background: var(--accent); }
+
+.seg.count-seg button { min-height: 44px; font-variant-numeric: tabular-nums; }
+
+/* 最近測驗 */
+.recent-row { display: flex; align-items: center; gap: 10px; min-height: 52px; padding: 10px 16px; font-size: 15px; }
+.recent-row + .recent-row { border-top: 1px solid var(--line); }
+.recent-main { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.recent-score { flex: none; padding: 2px 10px; border-radius: 999px; background: var(--accent-soft); color: var(--accent); font-size: 13px; font-weight: 700; font-variant-numeric: tabular-nums; }
+.recent-date { flex: none; min-width: 40px; text-align: right; color: var(--muted); font-size: 13px; font-variant-numeric: tabular-nums; }
+
+/* 開始測驗 with the summary right above it: a solid bar, so the summary never sits over the list */
+.bottombar.start-bar {
+  flex-direction: column;
+  gap: 8px;
+  padding-top: 18px;
+  background: linear-gradient(to top, var(--bg) calc(100% - 14px), rgba(0, 0, 0, 0));
+}
+
+.start-summary {
+  margin: 0;
+  text-align: center;
+  color: var(--muted);
+  font-size: 13.5px;
+  font-weight: 600;
+  line-height: 1.45;
+  font-variant-numeric: tabular-nums;
+  text-wrap: balance;
+}
+
+.start-summary.warn { color: var(--amber); }
 
 /* ---------- Flashcards ---------- */
 /* Exactly one screen tall: the card scrolls by itself and the buttons stay at the bottom.
@@ -1077,6 +1267,7 @@ svg { display: block; flex: none; }
 .wr-word, .wr-meaning { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .wr-word { font-size: 16px; font-weight: 600; }
 .wr-meaning { margin-top: 1px; color: var(--muted); font-size: 14px; }
+.wr-deck { margin-top: 2px; color: var(--muted); font-size: 12px; opacity: 0.85; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
 .pill {
   flex: none;
@@ -1312,7 +1503,10 @@ input[type="range"] { width: 100%; margin: 0; accent-color: var(--accent); }
   font-size: 14px;
 }
 
-.sections .sec-name { flex: 1; min-width: 0; font-weight: 600; overflow-wrap: anywhere; }
+.sections .sec-main { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+.sections .sec-name { font-weight: 600; overflow-wrap: anywhere; }
+.sections .sec-folder { display: flex; align-items: center; gap: 4px; color: var(--muted); font-size: 12.5px; overflow-wrap: anywhere; }
+.sections .sec-folder svg { width: 14px; height: 14px; color: var(--accent); }
 .sections .sec-tag { flex: none; padding: 1px 8px; border-radius: 999px; background: var(--accent-soft); color: var(--accent); font-size: 11px; font-weight: 600; }
 .sections .sec-num { flex: none; color: var(--muted); font-variant-numeric: tabular-nums; }
 
@@ -1571,6 +1765,10 @@ button.set-row.danger, button.set-row.danger > svg { color: var(--red); }
 .menu-item:active { background: var(--surface-2); }
 .menu-item svg { width: 22px; height: 22px; color: var(--muted); }
 .menu-item.primary, .menu-item.primary svg { color: var(--accent); font-weight: 600; }
+.menu-label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* 移動到資料夾: the folder the deck is in now */
+.menu-item.current, .menu-item.current svg { color: var(--accent); font-weight: 600; }
+.menu-item .menu-check { width: 20px; height: 20px; }
 .menu-item.danger, .menu-item.danger svg { color: var(--red); }
 .menu-sep { height: 1px; margin: 6px 12px; background: var(--line); }
 
@@ -1591,7 +1789,7 @@ button.set-row.danger, button.set-row.danger > svg { color: var(--red); }
 }
 
 .modal h3 { margin: 0 0 8px; font-size: 18px; font-weight: 700; line-height: 1.4; text-wrap: balance; overflow-wrap: anywhere; }
-.modal p { margin: 0; color: var(--muted); font-size: 15px; line-height: 1.65; white-space: pre-wrap; }
+.modal p { margin: 0; color: var(--muted); font-size: 15px; line-height: 1.65; white-space: pre-wrap; text-wrap: pretty; }
 .modal .input { margin-top: 14px; }
 .modal-actions { display: flex; gap: 10px; margin-top: 22px; }
 .modal-actions .btn { flex: 1; }
@@ -1689,6 +1887,9 @@ button.set-row.danger, button.set-row.danger > svg { color: var(--red); }
   .tile { gap: 12px; padding-left: 14px; }
   .tile-icon { width: 44px; height: 44px; border-radius: 13px; }
   .spell-row .btn { padding: 0 14px; }
+  .folder-bar .btn { padding: 0 12px; font-size: 16px; gap: 6px; }
+  .mode-opt { padding: 12px; }
+  .mo-head { font-size: 16px; }
 }
 
 @media (max-height: 640px) {
@@ -1700,6 +1901,14 @@ button.set-row.danger, button.set-row.danger > svg { color: var(--red); }
 
 /* Phones in landscape: a compact card, so the meaning fits above the buttons. */
 @media (max-height: 500px) {
+  .tab { flex-direction: row; gap: 6px; font-size: 13px; }
+  .tab svg { width: 22px; height: 22px; }
+  /* Above the tab bar: a slimmer bottom bar, so the list keeps most of the screen. */
+  body.has-tabbar .bottombar { padding-top: 12px; padding-bottom: 6px; }
+  body.has-tabbar .bottombar .btn-lg { min-height: 46px; }
+  .bottombar.start-bar { flex-direction: row; align-items: center; gap: 14px; }
+  .bottombar.start-bar .start-summary { flex: 1; text-align: left; }
+  .bottombar.start-bar .btn { flex: none; min-width: 200px; }
   .fc-body { padding-top: 8px; padding-bottom: 10px; }
   .flashcard { padding: 14px 24px 16px; }
   .card-front, .flashcard.flipped .card-front { padding-top: 0; }

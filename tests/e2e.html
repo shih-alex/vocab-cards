@@ -28,7 +28,7 @@
  * Run headless via tests/run_tests.py, or open http://localhost:8000/tests/e2e.html in a browser
  * to watch. Only on localhost / 127.0.0.1 / [::1]: the tests share this origin's localStorage with
  * the app, so on the app's own web address they refuse to run. Every e2e-<run> key is removed at
- * the end. Add ?only=<text> to run only the tests whose name contains <text>.
+ * the end. Add ?only=<text> to run only the tests whose name contains <text> (several: a|b).
  */
 (function () {
   'use strict';
@@ -264,16 +264,22 @@
    */
   function fillStorage(freeChars) {
     const keys = [];
-    let size = 1 << 20;
-    while (size >= 256) {
+    const add = (size) => {
       const k = 'e2e-fill-' + RUN_ID + '-' + keys.length;
-      try { localStorage.setItem(k, 'x'.repeat(size)); keys.push({ k: k, size: size }); } catch (e) { size >>= 1; }
-    }
+      try { localStorage.setItem(k, 'x'.repeat(size)); keys.push({ k: k, size: size }); return true; } catch (e) { return false; }
+    };
+    for (let size = 1 << 20; size >= 256;) if (!add(size)) size >>= 1;
     let freed = 0;
     for (let i = keys.length - 1; i >= 0 && freed < freeChars; i--) {
       localStorage.removeItem(keys[i].k);
       freed += keys[i].size;
       keys.splice(i, 1);
+    }
+    // The small pieces may not add up to freeChars, and then a big one went: give back the rest
+    // (how much was free before depends on what earlier tests stored).
+    let extra = freed - freeChars;
+    for (let size = 1 << 20; size >= 256;) {
+      if (size <= extra && add(size)) extra -= size; else size >>= 1;
     }
     return () => keys.forEach((x) => localStorage.removeItem(x.k));
   }
@@ -354,6 +360,50 @@
     await onScreen('deck');
   }
 
+  // Quiz page (#/quiz)
+  const pickRow = (deckId) => $('[data-action="quiz-deck"][data-deck-id="' + deckId + '"]');
+  const folderPick = (folderId) => $('[data-action="quiz-folder"][data-folder-id="' + folderId + '"]');
+  const pickMeta = (deckId) => text(pickRow(deckId) && pickRow(deckId).querySelector('.pick-meta'));
+  const quizSummary = () => text($('#quiz-summary'));
+  const countButtons = () => $$('.count-seg button').map((b) => [b.getAttribute('data-action'), text(b), b.getAttribute('aria-pressed')]);
+  const tabBarShown = () => { const t = $('nav.tabbar'); return !!t && !t.hidden && D().body.classList.contains('has-tabbar'); };
+
+  /** Deck hub → 測驗: the quiz page with only this deck chosen. */
+  async function hubQuizPage() {
+    click('hub-quiz');
+    await onScreen('quiz-setup');
+  }
+
+  /** On the quiz page: the kind of question (and how many), then 開始測驗. */
+  async function startFromSetup(mode, count) {
+    click('quiz-mode-' + mode);
+    if (count) click('quiz-count-' + count);
+    click('quiz-start');
+    await onScreen('quiz');
+  }
+
+  /** Deck hub → 測驗 → kind → 開始測驗 (what the v2 tiles 選擇題 / 拼字題 did in one tap). */
+  async function quizFromHub(mode, count) {
+    await hubQuizPage();
+    await startFromSetup(mode, count);
+  }
+
+  /** On the quiz page: exactly these decks chosen (全部取消, then a tap on each). */
+  function chooseDecks(ids) {
+    if (act('quiz-all')) click('quiz-all');
+    click('quiz-none');
+    ids.forEach((id) => click(pickRow(id), 'quiz-deck ' + id));
+  }
+
+  /** Answer every question of a choice quiz (right = (i) => bool) until the results show. */
+  async function answerAllChoice(right) {
+    for (let i = 0; !$('#quiz-results') && i < 200; i++) {
+      click('option-' + (right(i) ? correctIndex() : wrongIndex()));
+      click('quiz-next');
+      await sleep(10);
+    }
+  }
+
   // Flashcards
   const flashWord = () => text($('#flash-card .card-front .word'));
   const flashProgress = () => text($('#flash-progress'));
@@ -387,22 +437,26 @@
     await waitFor(() => $$('.deck-row').length === 1, 'deck row after loading sample');
     const s = S();
     const sample = W().VC_SAMPLE;
-    eq(s.version, 2, 'data format version 2');
+    eq(s.version, 3, 'data format version 3');
     eq(s.decks.length, 1, 'one deck');
     eq(s.decks[0].name, sample.name, 'deck named after the sample');
     eq(s.cards.length, 40, '40 sample cards');
     eq(cardsOf(s, s.decks[0].id)[0].word, 'abandon', 'import order kept (first card)');
-    eq([s.decks[0].settings, s.decks[0].flash, s.decks[0].lastQuiz], [{ direction: 'en2zh' }, { index: 0, shuffle: false, seed: 0 }, {}],
-      'deck defaults: 字卡正面 英文, first flashcard, no quiz yet');
+    eq(Object.keys(s.decks[0]).sort(), ['created', 'flash', 'folderId', 'id', 'name', 'settings'], 'deck fields (no per-deck quiz result)');
+    eq([s.decks[0].settings, s.decks[0].flash, s.decks[0].folderId], [{ direction: 'en2zh' }, { index: 0, shuffle: false, seed: 0 }, null],
+      'deck defaults: 字卡正面 英文, first flashcard, not in a folder');
     eq(Object.keys(s.cards[0]).sort(), ['created', 'deckId', 'example', 'exampleZh', 'id', 'meaning', 'note', 'phonetic', 'right', 'seq', 'word', 'wrong'],
       'card fields: no spaced-repetition fields');
     eq([totalOf(s, 'right'), totalOf(s, 'wrong')], [0, 0], 'no quiz answers yet');
-    eq(s.prefs.quizCount, 10, '10 questions per quiz by default');
+    eq([s.folders, s.quizHistory], [[], []], 'no folders, no finished quizzes');
+    eq(s.prefs.quizSetup, { mode: 'choice', deckIds: null, count: 10 }, 'quiz page: 選擇題, every deck, 10 questions by default');
+    ok(!('quizCount' in s.prefs), 'no v2 每次測驗題數 pref');
     ok(!('days' in s), 'no day statistics');
     const row = $('.deck-row');
     eq(text(row.querySelector('.deck-name')), sample.name, 'row shows the deck name');
-    eq(text(row.querySelector('.deck-total')), '共 40 字', 'total');
-    ok(!row.querySelector('.deck-scores'), 'no quiz scores yet');
+    eq(text(row.querySelector('.deck-meta')), '共 40 字', 'second line: only the total (no quiz scores)');
+    ok(!$('.folder-row') && $$('.section-title').map(text).join() === '我的牌組', 'no folder section without folders');
+    ok(act('new-deck') && act('new-folder'), '建立空白牌組 · 新增資料夾 under the list');
     ok(!$('#today-line'), 'no today / streak line');
     ok(toasts().some((t) => t.indexOf('已載入範例牌組（40 張）') >= 0), 'toast confirms the sample', JSON.stringify(toasts()));
     ok(act('open-import'), 'bottom 「＋ 匯入單字」 button');
@@ -577,95 +631,154 @@
         created: 1690000000000, seq: 2, state: 'new', due: 0, step: 0, interval: 0, ease: 2.5, reps: 0, lapses: 0, lastReview: 0 },
     ],
   };
+  // What v2.x stored: 每次測驗題數 (prefs.quizCount), the last result per deck (deck.lastQuiz).
   const V2_STATE = {
     version: 2, seq: 2,
-    prefs: { theme: 'dark', autoSpeak: true, speechRate: 1.1, voiceURI: null, quizCount: 10, lastBackupAt: 1700000000000,
+    prefs: { theme: 'dark', autoSpeak: true, speechRate: 1.1, voiceURI: null, quizCount: 20, lastBackupAt: 1700000000000,
       backupNagAt: null, iosTipDismissed: true },
     decks: [{ id: 'd1', name: '舊牌組', created: 1690000000000, settings: { direction: 'zh2en' },
-      flash: { index: 0, shuffle: false, seed: 0 }, lastQuiz: {} }],
+      flash: { index: 1, shuffle: false, seed: 0, cardId: 'c2' }, lastQuiz: { choice: { score: 7, total: 10, at: 1695000000000 } } }],
     cards: [
       { id: 'c1', deckId: 'd1', word: 'apple', phonetic: '/ˈæpəl/', meaning: 'n. 蘋果', example: 'An apple a day.', exampleZh: '一天一蘋果。',
-        note: '', created: 1690000000000, seq: 1, right: 0, wrong: 0 },
+        note: '', created: 1690000000000, seq: 1, right: 3, wrong: 1 },
       { id: 'c2', deckId: 'd1', word: 'banana', phonetic: '', meaning: 'n. 香蕉', example: '', exampleZh: '', note: '黃色',
-        created: 1690000000000, seq: 2, right: 0, wrong: 0 },
+        created: 1690000000000, seq: 2, right: 0, wrong: 2 },
     ],
   };
 
-  test('v1 → v2: stored spaced-repetition data and old backups are converted', async function () {
+  /** What v3 makes of V1_STATE / V2_STATE: no folders and no finished quizzes yet; 題數 = the old 每次測驗題數. */
+  function v3Of(old) {
+    const v2 = old.version === 2;
+    return {
+      version: 3, seq: 2, folders: [], quizHistory: [],
+      prefs: { theme: 'dark', autoSpeak: true, speechRate: 1.1, voiceURI: null, lastBackupAt: 1700000000000, backupNagAt: null,
+        iosTipDismissed: true, quizSetup: { mode: 'choice', deckIds: null, count: v2 ? 20 : 10 } },
+      decks: [{ id: 'd1', name: '舊牌組', created: 1690000000000, folderId: null, settings: { direction: 'zh2en' },
+        flash: v2 ? { index: 1, shuffle: false, seed: 0, cardId: 'c2' } : { index: 0, shuffle: false, seed: 0 } }],
+      cards: V2_STATE.cards.map((c) => Object.assign({}, c, v2 ? {} : { right: 0, wrong: 0 })),
+    };
+  }
+
+  /** Restore a backup file through the import screen of a fresh app; returns the dialog text. */
+  async function restoreThroughImport(backup) {
+    await openApp({ clock: T0 });
+    click('empty-paste');
+    await onScreen('import');
+    setFiles($('#file-input'), [makeFile([JSON.stringify(backup)], '單字卡備份.json', 'application/json')]);
+    const m = await waitFor(modalOpen, 'restore dialog');
+    const said = text(m);
+    await modalAnswer(true);
+    await onScreen('home');
+    return said;
+  }
+
+  test('v1 → v3: stored spaced-repetition data and old backups are converted', async function () {
     const sk = 'e2e-' + RUN_ID + '-v1';
     localStorage.setItem(sk, JSON.stringify(V1_STATE));
     await openApp({ sk: sk, keep: true, clock: T0 });
-    eq(S(), V2_STATE, 'loaded: schedule fields, day statistics and daily limits dropped; words, decks and prefs kept');
+    eq(S(), v3Of(V1_STATE), 'loaded: schedule fields, day statistics and daily limits dropped; words, decks and prefs kept');
     ok(!$('#home-notice'), 'no warning');
     eq(text($('.deck-row .deck-total')), '共 2 字', 'the old deck is on home');
     await sleep(400);
-    eq(JSON.parse(localStorage.getItem(sk)), V2_STATE, 'the converted data is saved right away');
+    eq(JSON.parse(localStorage.getItem(sk)), v3Of(V1_STATE), 'the converted data is saved right away');
     await openDeck('d1');
     click('hub-cards');
     await onScreen('cards');
     eq(text($('#flash-card .front-meaning')), 'n. 蘋果', 'the old 中→英 setting still applies');
 
-    // A backup made by v1.x restores into v2.
-    await openApp({ clock: T0 });
-    click('empty-paste');
-    await onScreen('import');
-    const backup = { app: 'vocabcards', version: 1, exportedAt: new Date(T0 - DAY).toISOString(), data: V1_STATE };
-    setFiles($('#file-input'), [makeFile([JSON.stringify(backup)], '單字卡備份.json', 'application/json')]);
-    const m = await waitFor(modalOpen, 'restore dialog');
-    ok(/1 個牌組、2 張卡片/.test(text(m)), 'the dialog counts the old backup', text(m));
-    ok(/測驗紀錄/.test(text(m)) && !/學習進度/.test(text(m)), 'v2 wording in the dialog', text(m));
-    await modalAnswer(true);
-    await onScreen('home');
-    eq(S(), V2_STATE, 'restored and converted');
+    // A backup made by v1.x restores into v3.
+    const said = await restoreThroughImport({ app: 'vocabcards', version: 1, exportedAt: new Date(T0 - DAY).toISOString(), data: V1_STATE });
+    ok(/1 個牌組、2 張卡片/.test(said), 'the dialog counts the old backup', said);
+    ok(/測驗紀錄/.test(said) && !/學習進度|資料夾/.test(said), 'current wording in the dialog (no folders in it)', said);
+    eq(S(), v3Of(V1_STATE), 'restored and converted');
 
-    // What this version writes: version 2, data and backups.
+    // What this version writes: version 3, data and backups.
     click('open-settings');
     await onScreen('settings');
     const captured = captureDownloads();
     click('export-backup');
     await waitFor(() => captured.length === 1, 'backup download');
     const written = JSON.parse(await captured[0].blob.text());
-    eq([written.app, written.version, written.data.version], ['vocabcards', 2, 2], 'a backup is version 2');
+    eq([written.app, written.version, written.data.version], ['vocabcards', 3, 3], 'a backup is version 3');
     ok(!('days' in written.data) && !('state' in written.data.cards[0]), 'nothing of the old format is written back');
+    noAppErrors();
+  });
+
+  test('v2 → v3: folders, quiz history and the quiz-page setup are added; 每次測驗題數 is kept', async function () {
+    const sk = 'e2e-' + RUN_ID + '-v2';
+    localStorage.setItem(sk, JSON.stringify(V2_STATE));
+    await openApp({ sk: sk, keep: true, clock: T0 });
+    eq(S(), v3Of(V2_STATE), 'loaded: folderId null, folders [], quizHistory [], quizSetup (count 20 from quizCount); lastQuiz dropped');
+    ok(!$('#home-notice') && !$('.folder-row'), 'no warning, no folders');
+    eq(text($('.deck-row .deck-meta')), '共 2 字', 'the deck row: just the total (the old last result is gone)');
+    await sleep(400);
+    const stored = JSON.parse(localStorage.getItem(sk));
+    eq(stored, v3Of(V2_STATE), 'the converted data is saved right away');
+    ok(!('lastQuiz' in stored.decks[0]) && !('quizCount' in stored.prefs), 'no v2 leftovers are stored');
+    await openDeck('d1');
+    eq(text($('[data-action="hub-cards"] .tile-meta')), '看到第 2 張', 'the flashcard place is kept');
+    eq($$('.tile').map((t) => t.getAttribute('data-action')), ['hub-cards', 'hub-quiz'], 'v3 hub: 字卡 · 測驗');
+    click('back');
+    await onScreen('home');
+    click('tab-quiz');
+    await onScreen('quiz-setup');
+    ok(pickRow('d1') && pickRow('d1').getAttribute('aria-checked') === 'true', 'the quiz page: the old deck chosen');
+    ok(!$('#quiz-recent'), 'no 最近測驗 (v2 kept only a last result per deck)');
+
+    // A v2.x backup restores into v3, with the answers on its cards.
+    const said = await restoreThroughImport({ app: 'vocabcards', version: 2, exportedAt: new Date(T0 - DAY).toISOString(), data: V2_STATE });
+    ok(/1 個牌組、2 張卡片/.test(said), 'the dialog counts the v2 backup', said);
+    eq(S(), v3Of(V2_STATE), 'restored and converted');
+    eq([totalOf(S(), 'right'), totalOf(S(), 'wrong')], [3, 3], 'quiz answers on the cards kept');
+    // A backup without an envelope (just the data) restores as well.
+    await restoreThroughImport(V2_STATE);
+    eq(S(), v3Of(V2_STATE), 'bare v2 data restored and converted');
     noAppErrors();
   });
 
   /* ----------------------------------------------------------------- deck hub */
 
-  test('deck hub: tiles, meta, 每次測驗題數, 瀏覽與編輯單字', async function () {
+  test('deck hub: 字卡 · 測驗 (the quiz page with this deck chosen), meta, 瀏覽與編輯單字', async function () {
     await openApp({ clock: T0 });
     seedSample();
+    W().VCApp.importText(wordsText(10), { deckName: '另一個牌組' });
     const deckId = S().decks[0].id;
     await openDeck(deckId);
     eq(W().location.hash, '#/deck/' + encodeURIComponent(deckId), 'route #/deck/<id>');
     eq(text($('.topbar-title')), '範例・高中常用單字', 'deck name in the top bar');
     ok(act('back') && act('deck-settings'), 'back + deck settings');
+    ok(!tabBarShown(), 'no tab bar on the hub');
     eq(text($('#hub-count')), '共 40 字', 'word count');
-    eq($$('.tile').map((b) => b.getAttribute('data-action')), ['hub-cards', 'hub-choice', 'hub-spell'], 'three tiles');
-    eq($$('.tile .tile-title').map(text), ['字卡', '選擇題', '拼字題'], 'tile titles');
-    eq($$('.tile .tile-desc').map(text), ['翻面背單字', '看英文，選出中文意思', '看例句，拼出單字'], 'tile descriptions');
+    eq($$('.tile').map((b) => b.getAttribute('data-action')), ['hub-cards', 'hub-quiz'], 'two tiles');
+    eq($$('.tile .tile-title').map(text), ['字卡', '測驗'], 'tile titles');
+    eq($$('.tile .tile-desc').map(text), ['翻面背單字', '選擇題或拼字題'], 'tile descriptions');
     ok($$('.tile').every((b) => !b.disabled && b.offsetHeight >= 56), 'big, enabled tiles');
-    eq($$('.tile .tile-meta').length, 0, 'no meta yet (first card, no quiz, every example has its word)');
-    eq($$('.quiz-seg button').map((b) => [b.getAttribute('data-action'), text(b), b.getAttribute('aria-pressed')]),
-      [['quiz-count-10', '10', 'true'], ['quiz-count-20', '20', 'false'], ['quiz-count-all', '全部', 'false']], '每次測驗題數 10 / 20 / 全部');
-    ok(/每次測驗題數/.test(text($('.hub-more'))), 'labelled');
+    eq($$('.tile .tile-meta').length, 0, 'no meta yet (first card)');
+    ok(!$('.quiz-seg') && !act('hub-choice') && !act('hub-spell') && !/每次測驗題數|上次/.test(text($('main'))),
+      'no per-deck quiz tiles, 題數 or last result any more');
 
-    click('quiz-count-20');
-    eq([S().prefs.quizCount, act('quiz-count-20').getAttribute('aria-pressed')], [20, 'true'], '20 chosen and saved in prefs');
-    click('hub-choice');
-    await onScreen('quiz');
-    eq(W().location.hash, '#/quiz/' + encodeURIComponent(deckId) + '/choice', 'route #/quiz/<id>/choice');
+    // 測驗 → the quiz page with only this deck chosen (as #/quiz: back here returns to it).
+    const s0 = S();
+    s0.prefs.quizSetup = { mode: 'spell', deckIds: [deckNamed(s0, '另一個牌組').id], count: 20 };
+    W().VCApp.setState(s0);
+    await hubQuizPage();
+    eq(W().location.hash, '#/quiz', 'shows as #/quiz');
+    eq($$('[data-action="quiz-deck"][aria-checked="true"]').map((b) => b.getAttribute('data-deck-id')), [deckId], 'only this deck chosen');
+    eq([S().prefs.quizSetup.deckIds, S().prefs.quizSetup.mode, S().prefs.quizSetup.count], [[deckId], 'spell', 20],
+      'the kind and 題數 chosen before stay');
+    ok(tabBarShown() && act('tab-quiz').getAttribute('aria-current') === 'page', 'the 測驗 tab is current');
+    await startFromSetup('choice');
     eq(quizCount(), '1 / 20', '20 questions');
     click('quiz-quit');
-    await onScreen('deck');
+    await onScreen('quiz-setup');
     click('quiz-count-all');
-    eq(S().prefs.quizCount, 0, '全部 = 0');
-    click('hub-spell');
-    await onScreen('quiz');
-    eq(W().location.hash, '#/quiz/' + encodeURIComponent(deckId) + '/spell', 'route #/quiz/<id>/spell');
+    await startFromSetup('spell');
     eq(quizCount(), '1 / 40', 'all 40');
     click('quiz-quit');
+    await onScreen('quiz-setup');
+    W().history.back();
     await onScreen('deck');
+    eq(text($('.topbar-title')), '範例・高中常用單字', 'back from the quiz page: the deck again');
     click('hub-words');
     await onScreen('browse');
     eq(W().location.hash, '#/deck/' + encodeURIComponent(deckId) + '/words', 'route #/deck/<id>/words');
@@ -689,24 +802,25 @@
     const small = deckNamed(S(), '小牌組').id;
     await openDeck(small);
     eq(text($('#hub-count')), '共 8 字', 'count');
-    ok(!$('.quiz-seg'), 'a deck of 8 words: nothing to choose');
-    eq(text($('#quiz-count-fixed')), '全部 (8)', 'it says 全部 (8)');
-    eq(text($('[data-action="hub-spell"] .tile-meta')), '可出 6 題', '拼字題: how many words can be asked');
-    ok(!$('[data-action="hub-choice"] .tile-meta'), '選擇題: no meta');
-    click('hub-spell');
-    await onScreen('quiz');
+    ok(!$('.tile-meta'), 'no meta on the tiles');
+    await hubQuizPage();
+    eq([pickMeta(small), quizSummary()], ['8 字 · 可出 6 題', '已選 1 個牌組 · 可出 6 題'], '拼字題: how many words can be asked');
+    eq(countButtons(), [['quiz-count-all', '全部 (6)', 'true']], 'six questions: only 全部 (6)');
+    click('quiz-mode-choice');
+    eq([pickMeta(small), quizSummary()], ['8 字', '已選 1 個牌組 · 可出 8 題'], '選擇題: every word');
+    await startFromSetup('spell');
     eq(quizCount(), '1 / 6', 'only the six usable words');
     click('quiz-quit');
+    await onScreen('quiz-setup');
+    W().history.back();
     await onScreen('deck');
     click('back');
     await onScreen('home');
     W().VCApp.importText(wordsText(15), { deckName: '十五個字' });
     await openDeck(deckNamed(S(), '十五個字').id);
-    eq($$('.quiz-seg button').map((b) => [text(b), b.getAttribute('aria-pressed')]), [['10', 'false'], ['全部 (15)', 'true']],
-      '15 words: 10 or 全部 (15)');
-    click('back');
-    await onScreen('home');
-    eq(S().prefs.quizCount, 0, 'the count is one setting for all decks');
+    await hubQuizPage();
+    eq(countButtons().map((b) => [b[1], b[2]]), [['10', 'false'], ['全部 (15)', 'true']], '15 words: 10 or 全部 (15)');
+    eq(S().prefs.quizSetup.count, 0, 'the count is one setting for every quiz');
     noAppErrors();
   });
 
@@ -722,7 +836,7 @@
     eq(text($('.topbar-title')), '我的新牌組', 'the new deck opens');
     ok($('#hub-empty') && act('import-to-deck') && act('add-card'), 'empty deck: 匯入單字到這個牌組 + 新增單字');
     eq([text(act('import-to-deck')), text(act('add-card'))], ['匯入單字到這個牌組', '新增單字'], 'labels');
-    ok(!$('.tile') && !$('.quiz-seg') && !$('#hub-count'), 'no tiles or quiz settings without words');
+    ok(!$('.tile') && !$('#hub-count'), 'no tiles without words');
     const deckId = deckNamed(S(), '我的新牌組').id;
 
     // Old links / bookmarks to the flashcards and quizzes of an empty deck.
@@ -732,9 +846,13 @@
     click('flash-home');
     await onScreen('deck');
     W().location.hash = '#/quiz/' + encodeURIComponent(deckId) + '/choice';
-    await onScreen('quiz');
-    ok($('#quiz-empty'), 'quiz: explained');
-    click('quiz-home');
+    await onScreen('quiz-setup');
+    eq(W().location.hash, '#/quiz', 'a v2 quiz link opens the quiz page');
+    eq([pickRow(deckId).getAttribute('aria-checked'), pickMeta(deckId)], ['true', '還沒有單字'], 'with that deck chosen (no words yet)');
+    ok(pickRow(deckId).classList.contains('dim'), 'greyed');
+    eq(quizSummary(), '已選 1 個牌組 · 選的牌組還沒有單字', 'says why nothing can be asked');
+    ok(act('quiz-start').disabled && !$('.count-seg'), '開始測驗 disabled, no 題數');
+    W().history.back();
     await onScreen('deck');
 
     // 新增單字 right from the empty hub.
@@ -745,8 +863,13 @@
     click('card-save');
     await overlaysGone();
     eq(text($('#hub-count')), '共 1 字', 'the hub now shows the deck');
-    ok(!act('hub-choice').disabled, 'one word: 選擇題 borrows options from the other deck');
-    ok(!act('hub-spell').disabled, 'its example has the word: 拼字題 works');
+    ok(!act('hub-quiz').disabled, 'one word: 測驗 works (選擇題 borrows options from the other deck)');
+    await hubQuizPage();
+    eq(quizSummary(), '已選 1 個牌組 · 可出 1 題', 'one question');
+    click('quiz-mode-spell');
+    eq(quizSummary(), '已選 1 個牌組 · 可出 1 題', 'its example has the word: 拼字題 works');
+    W().history.back();
+    await onScreen('deck');
 
     click('back');
     await onScreen('home');
@@ -874,6 +997,8 @@
     click('flash-to-choice');
     await onScreen('quiz');
     eq([text($('.topbar-title')), quizCount()], ['選擇題', '1 / 5'], 'end view → 選擇題');
+    ok(!tabBarShown(), 'no tab bar during a quiz');
+    eq([S().prefs.quizSetup.mode, S().prefs.quizSetup.deckIds], ['choice', [deckId]], 'it becomes the quiz page’s setup');
     click('quiz-quit');
     await onScreen('cards');
     eq(flashWord(), 'apple', 'back from the quiz: the flashcards from the first card');
@@ -1030,8 +1155,7 @@
       click('back');
       await onScreen('deck');
       seedRandom(1);
-      click('hub-choice');
-      await onScreen('quiz');
+      await quizFromHub('choice');
       eq(spoken[spoken.length - 1], quizCard().word, '選擇題: the question is read');
       const n = spoken.length;
       click('option-' + correctIndex());
@@ -1040,10 +1164,9 @@
       eq([spoken.length, spoken[n]], [n + 1, quizCard().word], 'and the next one');
       click('quiz-quit');
       await modalAnswer(true);
-      await onScreen('deck');
+      await onScreen('quiz-setup');
       const m = spoken.length;
-      click('hub-spell');
-      await onScreen('quiz');
+      await startFromSetup('spell');
       eq(spoken.length, m, '拼字題: never read aloud (it would give the answer away)');
     }
     noAppErrors();
@@ -1056,8 +1179,8 @@
     const deckId = await importWords(25, '選擇題');
     seedRandom(11);
     await openDeck(deckId);
-    click('hub-choice');
-    await onScreen('quiz');
+    await quizFromHub('choice');
+    eq(W().location.hash, '#/quiz/run', 'route #/quiz/run');
     eq(text($('.topbar-title')), '選擇題', 'title');
     eq(quizCount(), '1 / 10', 'counter');
     ok(act('quiz-quit'), '✕');
@@ -1143,8 +1266,10 @@
     const w0 = S().cards.find((c) => c.id === wrongIds[0]);
     eq([text($('.wl-row .wr-word')), text($('.wl-row .wr-meaning'))], [w0.word, w0.meaning], 'word · meaning');
     eq(text(act('retry-wrong')), '重測答錯的 3 題', 'retry button');
-    ok(act('quiz-again') && act('quiz-home'), '再測一次 · 回到牌組');
-    eq(S().decks[0].lastQuiz, { choice: { score: 7, total: 10, at: T0 } }, 'the result is saved on the deck');
+    eq([text(act('quiz-again')), text(act('quiz-home'))], ['再測一次', '回到測驗'], '再測一次 · 回到測驗');
+    ok(!$('.wr-deck'), 'one deck tested: no deck name on the wrong words');
+    eq(text($('.score-sub')), '選擇題 · 10 題 · 選擇題', 'sub line: kind, count, the deck');
+    eq(S().quizHistory, [{ mode: 'choice', deckIds: [deckId], score: 7, total: 10, at: T0 }], 'the result goes into 最近測驗');
     eq([totalOf(S(), 'right'), totalOf(S(), 'wrong')], [7, 3], 'every answer counted on its card');
     eq(text($('.topbar-title')), '選擇題', 'still the quiz screen');
 
@@ -1163,21 +1288,25 @@
     eq(retryIds, wrongIds, 'the same questions');
     eq(text($('#quiz-score')), '3 / 3', 'retry score');
     eq(text($('.score-line')), '太厲害了！', '≥ 90%');
-    eq(text($('.score-sub')), '重測答錯的題目', 'marked as a retry');
+    eq(text($('.score-sub')), '重測答錯的題目 · 選擇題', 'marked as a retry');
     ok(!act('retry-wrong') && !$('.wrong-list'), 'nothing wrong');
     ok(act('quiz-again').classList.contains('btn-primary'), '再測一次 is the main button now');
-    eq(S().decks[0].lastQuiz.choice, { score: 7, total: 10, at: T0 }, 'a retry does not replace the last result');
+    eq(S().quizHistory.length, 1, 'a retry does not go into 最近測驗');
     eq(totalOf(S(), 'right'), 10, 'retry answers are counted on the cards');
 
     click('quiz-again');
     await waitFor(() => quizCount() === '1 / 10', 'a new quiz');
     ok(!$('#quiz-results'), 'questions again');
     click('quiz-quit');
+    await onScreen('quiz-setup');
+    eq($$('#quiz-recent .recent-row').map(text), ['選擇題 · 選擇題 · 7/10 · ' + (NOW.getMonth() + 1) + '/' + NOW.getDate()],
+      'the quiz page: 最近測驗 (kind · deck · score · date)');
+    W().history.back();
     await onScreen('deck');
-    eq(text($('[data-action="hub-choice"] .tile-meta')), '上次 7/10', 'hub: the last result');
+    ok(!$('.tile-meta'), 'hub: no last result');
     click('back');
     await onScreen('home');
-    eq(text($('.deck-row .deck-scores')), '選擇 7/10', 'home: the last result');
+    eq(text($('.deck-row .deck-meta')), '共 25 字', 'home: no last result either');
     noAppErrors();
   });
 
@@ -1187,38 +1316,39 @@
     W().VCApp.importText('solo | n. 獨奏', { deckName: '一個字' });
     const soloId = deckNamed(S(), '一個字').id;
     await openDeck(soloId);
-    ok(act('hub-choice').disabled, 'one word, no other deck: 選擇題 disabled');
-    eq(text($('[data-action="hub-choice"] .tile-desc')), '要有兩個以上不同中文意思的單字才能出題', 'with the reason');
-    ok(act('hub-spell').disabled, 'no example: 拼字題 disabled too');
+    ok(act('hub-quiz').disabled, 'one word, no other deck, no example: 測驗 disabled');
+    eq(text($('[data-action="hub-quiz"] .tile-desc')), '要有兩個以上不同中文意思的單字才能出題', 'with the reason');
+    ok(!$('[data-action="hub-quiz"] .tile-chev'), 'no chevron on a disabled tile');
     ok(!act('hub-cards').disabled, '字卡 still works');
     W().location.hash = '#/quiz/' + encodeURIComponent(soloId) + '/choice';
-    await onScreen('quiz');
-    ok($('#quiz-empty'), 'opened through an old link: explained');
-    eq(text($('#quiz-empty h2')), '沒辦法出選擇題', 'title');
-    click('quiz-home');
+    await onScreen('quiz-setup');
+    eq(quizSummary(), '已選 1 個牌組 · 要有兩個以上不同中文意思的單字才能出題', 'opened through an old link: explained');
+    ok(act('quiz-start').disabled && $('#quiz-summary').classList.contains('warn'), '開始測驗 disabled, the reason stands out');
+    click('quiz-mode-spell');
+    eq(quizSummary(), '已選 1 個牌組 · 單字都沒有例句，無法出題', '拼字題: no example sentence');
+    click('quiz-mode-choice');
+    W().history.back();
     await onScreen('deck');
 
     // Two words with the same meaning + the other deck's word: two options, never the same meaning twice.
     W().VCApp.importText('duet | n. 二重奏\nduo | n. 二重奏', { deckName: '兩個字' });
     const duoId = deckNamed(S(), '兩個字').id;
     await hubVia(duoId);
-    click('hub-choice');
-    await onScreen('quiz');
+    await quizFromHub('choice');
     eq(quizCount(), '1 / 2', 'both words asked');
     eq(optTexts().slice().sort(), ['n. 二重奏', 'n. 獨奏'], 'two options: its meaning + the other deck’s');
     click('option-' + wrongIndex());
     ok($('.opt.correct') && $('.opt.wrong'), 'answering works with two options');
     click('quiz-quit');
     await modalAnswer(true);
-    await onScreen('deck');
+    await onScreen('quiz-setup');
     await hubVia(soloId);
-    ok(!act('hub-choice').disabled, 'one word + another deck: enabled');
+    ok(!act('hub-quiz').disabled, 'one word + another deck: enabled');
 
     // A bigger deck elsewhere: four options for the one-word deck.
     W().VCApp.importText(wordsText(25), { deckName: '大牌組' });
     await hubVia(soloId);
-    click('hub-choice');
-    await onScreen('quiz');
+    await quizFromHub('choice');
     eq(quizCount(), '1 / 1', 'one question');
     let opts = optTexts();
     eq([opts.length, new Set(opts).size, opts.filter((o) => o === 'n. 獨奏').length], [4, 4, 1], 'four distinct options');
@@ -1230,8 +1360,7 @@
     // Three words, two meanings: options from all decks, the shared meaning only once.
     W().VCApp.importText('cat | n. 貓\nkitty | n. 貓\ndog | n. 狗', { deckName: '動物' });
     await hubVia(deckNamed(S(), '動物').id);
-    click('hub-choice');
-    await onScreen('quiz');
+    await quizFromHub('choice');
     for (let i = 0; i < 3; i++) {
       opts = optTexts();
       ok(opts.length === 4 && new Set(opts).size === 4 && opts.filter((o) => o === 'n. 貓').length <= 1,
@@ -1245,8 +1374,7 @@
     W().VCApp.importText('red | adj. 紅色的\nblue | adj. 藍色的\ngreen | adj. 綠色的\nyellow | adj. 黃色的\nblack | adj. 黑色的', { deckName: '顏色' });
     const colors = ['adj. 紅色的', 'adj. 藍色的', 'adj. 綠色的', 'adj. 黃色的', 'adj. 黑色的'];
     await hubVia(deckNamed(S(), '顏色').id);
-    click('hub-choice');
-    await onScreen('quiz');
+    await quizFromHub('choice');
     for (let i = 0; i < 5; i++) {
       ok(optTexts().every((o) => colors.indexOf(o) >= 0), 'q' + (i + 1) + ': options from this deck only', JSON.stringify(optTexts()));
       click('option-' + correctIndex());
@@ -1265,9 +1393,10 @@
     W().VCApp.importText('zebra | n. 斑馬', { deckId: deckId });
     seedRandom(5);
     await openDeck(deckId);
-    eq(text($('[data-action="hub-spell"] .tile-meta')), '可出 12 題', 'only cards whose example has the word');
-    click('hub-spell');
-    await onScreen('quiz');
+    await hubQuizPage();
+    click('quiz-mode-spell');
+    eq(pickMeta(deckId), '13 字 · 可出 12 題', 'only cards whose example has the word');
+    await startFromSetup('spell');
     eq(text($('.topbar-title')), '拼字題', 'title');
     eq(quizCount(), '1 / 10', 'counter');
     const input = $('#spell-input');
@@ -1353,36 +1482,42 @@
     ok($('#quiz-results'), 'results');
     eq(text($('#quiz-score')), '8 / 10', 'score');
     eq(text($('.score-line')), '不錯喔，繼續加油！', 'line');
-    eq(text($('.score-sub')), '拼字題 · 10 題', 'sub line');
+    eq(text($('.score-sub')), '拼字題 · 10 題 · 拼字', 'sub line');
     eq($$('.wrong-list .wl-row').length, 2, 'two wrong words');
     ok(!$('.wrong-list .p-form'), 'no extra form when the sentence uses the word itself');
-    eq(S().decks[0].lastQuiz, { spell: { score: 8, total: 10, at: T0 } }, 'the result is saved');
+    eq(S().quizHistory, [{ mode: 'spell', deckIds: [deckId], score: 8, total: 10, at: T0 }], 'the result is saved');
     click('quiz-home');
-    await onScreen('deck');
-    eq(text($('[data-action="hub-spell"] .tile-meta')), '上次 8/10可出 12 題', 'hub: last result + how many');
-    click('back');
-    await onScreen('home');
-    eq(text($('.deck-row .deck-scores')), '拼字 8/10', 'home: last result');
+    await onScreen('quiz-setup');
+    eq(text($('#quiz-recent .recent-main')), '拼字題 · 拼字', '最近測驗 on the quiz page');
+    eq(text($('#quiz-recent .recent-score')), '8/10', 'with the score');
+    eq(act('quiz-mode-spell').getAttribute('aria-pressed'), 'true', '拼字題 still chosen');
     noAppErrors();
   });
 
-  test('拼字題: inflected forms, phrases, hint fallback; decks without usable examples', async function () {
+  test('拼字題: inflected forms, no phrases, hint fallback; decks without usable examples', async function () {
     await openApp({ clock: T0 });
     W().VCApp.importText([
       'abandon | v. 放棄 | He abandoned his car in the snow. | 他把車丟在雪地裡。',
       'study | v. 讀書 | She studied hard for the exam. | 她為了考試用功讀書。',
       'give up | phr. 放棄 | Never give up on your dreams. | 永遠不要放棄你的夢想。',
+      'look forward to + V-ing | phr. 期待 | I look forward to seeing you. | 我期待見到你。',
       'well-being | n. 幸福；健康 | Sleep is important for your well-being. | 睡眠對身心健康很重要。',
       'curious | adj. 好奇的 | Cats are curious animals.',
     ].join('\n'), { deckName: '變化' });
-    const masks = { abandon: 'a_______d', study: 's_____d', 'give up': 'g__e u_', 'well-being': 'w__l-b___g', curious: 'c_____s' };
+    const deckId = deckNamed(S(), '變化').id;
+    eq(S().cards.filter((c) => VC().isPhrase(c.word)).map((c) => c.word), ['give up', 'look forward to + V-ing'], 'VC.isPhrase: the two phrases');
+    const masks = { abandon: 'a_______d', study: 's_____d', 'well-being': 'w__l-b___g', curious: 'c_____s' };
     seedRandom(8);
-    await openDeck(deckNamed(S(), '變化').id);
-    click('hub-spell');
-    await onScreen('quiz');
-    eq(quizCount(), '1 / 5', 'all five');
+    await openDeck(deckId);
+    await hubQuizPage();
+    click('quiz-mode-spell');
+    eq([pickMeta(deckId), quizSummary()], ['6 字 · 可出 4 題', '已選 1 個牌組 · 可出 4 題'], 'phrases are not counted for 拼字題');
+    click('quiz-mode-choice');
+    eq(quizSummary(), '已選 1 個牌組 · 可出 6 題', '… but they are for 選擇題');
+    await startFromSetup('spell');
+    eq(quizCount(), '1 / 4', 'the four single words');
     const seen = [];
-    for (let i = 0; i < 5; i++) {
+    for (let i = 0; i < 4; i++) {
       const c = quizCard();
       seen.push(c.word);
       eq(text($('.cloze-mask')), masks[c.word], c.word + ': mask');
@@ -1392,35 +1527,48 @@
         click('spell-submit');
         ok($('.quiz-feedback.bad'), 'abandon for abandoned: wrong (the sentence needs the form)');
         eq(text($('.quiz-feedback .fb-title')), '正確答案：abandoned', 'the form it needed');
-      } else if (c.word === 'give up') {
-        setValue($('#spell-input'), 'Give  Up.');
+      } else if (c.word === 'well-being') {
+        setValue($('#spell-input'), 'Well-Being.');
         click('spell-submit');
-        ok($('.quiz-feedback.ok'), 'a phrase: case, double spaces and a final period do not matter');
+        ok($('.quiz-feedback.ok'), 'a hyphenated word is one word: case and a final period do not matter');
       } else {
         click('spell-giveup');
       }
       click('quiz-next');
       await sleep(10);
     }
-    eq(seen.slice().sort(), Object.keys(masks).sort(), 'every word asked once');
-    eq(text($('#quiz-score')), '1 / 5', 'score');
+    eq(seen.slice().sort(), Object.keys(masks).sort(), 'every single word asked once, no phrase');
+    eq(text($('#quiz-score')), '1 / 4', 'score');
     eq(text($('.score-line')), '多練幾次就會記住了！', '< 70%');
     const forms = {};
     $$('.wrong-list .wl-row').forEach((r) => { forms[text(r.querySelector('.wr-word'))] = text(r.querySelector('.p-form')); });
-    eq(forms, { abandon: 'abandoned', study: 'studied', 'well-being': null, curious: null }, 'wrong list: the form the sentence needed');
+    eq(forms, { abandon: 'abandoned', study: 'studied', curious: null }, 'wrong list: the form the sentence needed');
+    click('quiz-again');
+    await waitFor(() => quizCount() === '1 / 4', 'again');
+    for (let i = 0; i < 4; i++) {
+      ok(!VC().isPhrase(quizCard().word), '再測一次 q' + (i + 1) + ': no phrase either');
+      click('spell-giveup');
+      click('quiz-next');
+      await sleep(10);
+    }
 
     W().VCApp.importText('take | v. 拿 | He took the book. | 他拿了書。\nbuy | v. 買 | I bought it yesterday.\ngo | v. 去', { deckName: '不規則' });
     const irr = deckNamed(S(), '不規則').id;
     await hubVia(irr);
-    ok(act('hub-spell').disabled, 'no example contains its word: 拼字題 disabled');
-    eq(text($('[data-action="hub-spell"] .tile-desc')), '例句裡找不到單字，無法出題', 'with the reason');
-    ok(!$('[data-action="hub-spell"] .tile-chev'), 'no chevron on a disabled tile');
-    ok(!act('hub-choice').disabled, '選擇題 still works');
+    ok(!act('hub-quiz').disabled, '測驗 still works (選擇題)');
     W().location.hash = '#/quiz/' + encodeURIComponent(irr) + '/spell';
-    await onScreen('quiz');
-    ok($('#quiz-empty'), 'opened anyway: explained');
-    ok(/例句裡找不到單字，無法出題/.test(text($('#quiz-empty'))) && /瀏覽與編輯單字/.test(text($('#quiz-empty'))),
-      'says why and how to fix it', text($('#quiz-empty')));
+    await onScreen('quiz-setup');
+    eq([act('quiz-mode-spell').getAttribute('aria-pressed'), pickRow(irr).getAttribute('aria-checked')], ['true', 'true'],
+      'a v2 #/quiz/<deck>/spell link: 拼字題 with that deck chosen');
+    eq(pickMeta(irr), '3 字 · 沒有可出的題目', 'the deck says it has nothing to ask');
+    ok(pickRow(irr).classList.contains('dim'), '… greyed');
+    eq(quizSummary(), '已選 1 個牌組 · 例句裡找不到單字，無法出題', 'the reason');
+    ok(act('quiz-start').disabled, '開始測驗 disabled');
+    // A phrase-only deck says why.
+    W().VCApp.importText('give in | phr. 讓步 | He finally gave in. | 他終於讓步了。\nput off | phr. 延後 | Don\'t put off your homework. | 不要拖延功課。',
+      { deckName: '片語' });
+    chooseDecks([deckNamed(S(), '片語').id]);
+    eq(quizSummary(), '已選 1 個牌組 · 片語不考拼字，沒有可出的題目', 'only phrases: 片語不考拼字');
     noAppErrors();
   });
 
@@ -1429,12 +1577,11 @@
     const deckId = await importWords(8, '返回');
     seedRandom(2);
     await openDeck(deckId);
-    click('hub-choice');
-    await onScreen('quiz');
+    await quizFromHub('choice');
     click('quiz-quit');
-    await onScreen('deck');
-    ok(true, 'nothing answered: ✕ leaves right away');
-    click('hub-choice');
+    await onScreen('quiz-setup');
+    ok(!act('quiz-resume'), 'nothing answered: ✕ leaves right away, nothing to continue');
+    click('quiz-start');
     await onScreen('quiz');
     click('option-' + correctIndex());
     click('quiz-next');
@@ -1454,17 +1601,19 @@
     await sleep(100);
     eq([screenName(), quizCount()], ['quiz', '2 / 8'], 'Android back closes the dialog first');
     W().history.back();
-    await onScreen('deck');
-    eq(S().decks[0].lastQuiz, {}, 'an unfinished quiz is not a result');
+    await onScreen('quiz-setup');
+    eq(S().quizHistory, [], 'an unfinished quiz is not a result');
+    eq(text(act('quiz-resume') && act('quiz-resume').querySelector('.tile-title')), '繼續第 2 題', 'the quiz page offers to go on');
     W().history.forward();
     await onScreen('quiz');
     eq(quizCount(), '2 / 8', 'forward again: the quiz continues where it was');
     click('quiz-quit');
     eq(await modalAnswer(true), '要結束測驗嗎？', 'confirm');
-    await onScreen('deck');
+    await onScreen('quiz-setup');
+    ok(!act('quiz-resume'), 'ended: nothing to continue');
 
     // A finished quiz closes without asking.
-    click('hub-choice');
+    click('quiz-start');
     await onScreen('quiz');
     for (let i = 0; i < 8; i++) {
       click('option-' + correctIndex());
@@ -1473,9 +1622,12 @@
     }
     ok($('#quiz-results'), 'results');
     click('quiz-quit');
-    await onScreen('deck');
+    await onScreen('quiz-setup');
     ok(!modalOpen(), 'no question after the results');
-    eq(text($('[data-action="hub-choice"] .tile-meta')), '上次 8/8', 'saved');
+    eq(S().quizHistory.map((e) => e.score + '/' + e.total), ['8/8'], 'saved');
+    ok(!act('quiz-resume'), 'a finished quiz is not offered to go on');
+    W().history.back();
+    await onScreen('deck');
 
     // Flashcards: Android back closes the editor, then leaves.
     click('hub-cards');
@@ -1499,8 +1651,8 @@
     seedSample();
     const deckId = S().decks[0].id;
     await openSheetBy('deck-menu');
-    eq($$('.sheet .menu-item').map((b) => b.getAttribute('data-action')), ['sheet-browse', 'sheet-settings', 'sheet-export', 'sheet-delete'], 'deck menu actions');
-    eq($$('.sheet .menu-item span').map(text), ['瀏覽與編輯單字', '牌組設定', '匯出文字檔', '刪除牌組'], 'deck menu labels');
+    eq($$('.sheet .menu-item').map((b) => b.getAttribute('data-action')), ['sheet-browse', 'sheet-settings', 'deck-move', 'sheet-export', 'sheet-delete'], 'deck menu actions');
+    eq($$('.sheet .menu-item span').map(text), ['瀏覽與編輯單字', '牌組設定', '移動到資料夾', '匯出文字檔', '刪除牌組'], 'deck menu labels');
     click('sheet-browse');
     await onScreen('browse');
     eq(W().location.hash, '#/deck/' + encodeURIComponent(deckId) + '/words', 'route');
@@ -1618,6 +1770,7 @@
     eq(text(sheetOpen().querySelector('.sheet-title')), '牌組設定', 'title');
     eq($('#ds-name').value, '範例・高中常用單字', 'current name');
     ok(!$('#ds-new') && !$('#ds-review') && !/每日/.test(text(sheetOpen())), 'no daily limits');
+    ok(!$('#ds-folder'), 'no 資料夾 select while there is no folder');
     eq([text(act('dir-en2zh')), text(act('dir-zh2en'))], ['英文', '中文'], '字卡正面: 英文 / 中文');
     ok(/字卡正面/.test(text(sheetOpen())), 'labelled 字卡正面');
     eq(act('dir-en2zh').getAttribute('aria-pressed'), 'true', '英文 selected');
@@ -1726,14 +1879,15 @@
     const deckId = S().decks[0].id;
     seedRandom(2);
     await openDeck(deckId);
-    click('hub-choice');
-    await onScreen('quiz');
+    await quizFromHub('choice');
     click('option-' + correctIndex());
     click('quiz-next');
     await sleep(10);
     click('option-' + wrongIndex());
     click('quiz-quit');
     await modalAnswer(true);
+    await onScreen('quiz-setup');
+    W().history.back();
     await onScreen('deck');
     click('hub-cards');
     await onScreen('cards');
@@ -1753,12 +1907,13 @@
     ok(/^單字卡備份_\d{4}-\d{2}-\d{2}\.json$/.test(captured[0].name), 'backup file name', captured[0].name);
     ok(/把所有牌組和測驗紀錄存成/.test(text(act('export-backup'))), '匯出備份 says what is in it');
     const backup = JSON.parse(await captured[0].blob.text());
-    eq([backup.app, backup.version, typeof backup.exportedAt], ['vocabcards', 2, 'string'], 'backup envelope');
+    eq([backup.app, backup.version, typeof backup.exportedAt], ['vocabcards', 3, 'string'], 'backup envelope');
     eq(backup.exportedAt, new Date(T0).toISOString(), 'exportedAt uses the app clock');
     eq(backup.data, S(), 'backup data = full state');
     eq(backup.data.prefs.theme, 'dark', 'prefs included');
     eq([totalOf(backup.data, 'right'), totalOf(backup.data, 'wrong'), backup.data.decks[0].flash.index], [1, 1, 2],
       'quiz answers and the flashcard position included');
+    eq([backup.data.version, backup.data.prefs.quizSetup.deckIds], [3, [deckId]], 'data version 3, with the quiz page’s setup');
 
     click('clear-all');
     const m1 = await waitFor(modalOpen, 'first confirm');
@@ -1768,6 +1923,7 @@
     await overlaysGone();
     let s = S();
     eq([s.decks.length, s.cards.length, 'days' in s], [0, 0, false], 'everything cleared');
+    eq([s.folders, s.quizHistory, s.prefs.quizSetup.deckIds], [[], [], null], 'folders, 最近測驗 and the chosen decks too');
     eq(s.prefs.theme, 'dark', 'theme kept');
 
     // Cancelling the second confirm keeps the data.
@@ -1898,8 +2054,10 @@
     click('back');
     await onScreen('deck');
 
-    click('hub-choice');
-    await onScreen('quiz');
+    await hubQuizPage();
+    eq(text(pickRow('d1').querySelector('.pick-name')), X + '牌組', 'quiz page: deck name literal');
+    eq(injected(), 0, 'quiz page: nothing injected');
+    await startFromSetup('choice');
     eq(optTexts().slice().sort(), ['adj. 安全的 ' + X, '中文 ' + Y].sort(), 'options literal');
     click('option-' + wrongIndex());
     eq(injected(), 0, 'choice quiz: nothing injected');
@@ -1910,12 +2068,14 @@
     await sleep(10);
     ok($('#quiz-results'), 'results');
     ok($$('.wl-row .wr-word').map(text).indexOf(X) >= 0, 'wrong list literal');
+    eq(text($('.score-sub')), '選擇題 · 2 題 · ' + X + '牌組', 'sub line literal');
     eq(injected(), 0, 'results: nothing injected');
     click('quiz-home');
-    await onScreen('deck');
+    await onScreen('quiz-setup');
+    eq(text($('#quiz-recent .recent-main')), '選擇題 · ' + X + '牌組', '最近測驗 literal');
+    eq(injected(), 0, '最近測驗: nothing injected');
 
-    click('hub-spell');
-    await onScreen('quiz');
+    await startFromSetup('spell');
     eq(text($('.cloze')), 'It is <b>s__e</b> here.', 'the sentence is text, not markup');
     setValue($('#spell-input'), '<img src=x onerror=parent.__xss=7>', 'answer');
     click('spell-submit');
@@ -1924,7 +2084,34 @@
     click('quiz-next');
     await sleep(10);
     click('quiz-home');
+    await onScreen('quiz-setup');
+    W().history.back();
     await onScreen('deck');
+
+    // Folders: a name that looks like markup stays text (home, folder page, menus, quiz page).
+    const s2 = S();
+    s2.folders = [{ id: 'f1', name: X + '資料夾', created: T0 }];
+    s2.decks[0].folderId = 'f1';
+    W().VCApp.setState(s2);
+    W().location.hash = '#/';
+    await onScreen('home');
+    eq(text($('.folder-row .deck-name')), X + '資料夾', 'folder row literal');
+    click($('[data-action="folder-open"][data-folder-id="f1"]'), 'folder-open');
+    await onScreen('folder');
+    eq(text($('.topbar-title')), X + '資料夾', 'folder page title literal');
+    await openSheetBy('folder-menu');
+    eq(text($('.sheet-title')), X + '資料夾', 'folder menu title literal');
+    click('folder-delete');
+    await waitFor(modalOpen, 'delete confirm');
+    eq(text(modalOpen().querySelector('h3')), '刪除資料夾「' + X + '資料夾」？', 'confirm literal');
+    await modalAnswer(false);
+    await overlaysGone();
+    eq(injected(), 0, 'folder page and its dialogs: nothing injected');
+    click('tab-quiz');
+    await onScreen('quiz-setup');
+    eq(text(folderPick('f1').querySelector('.pick-name')), X + '資料夾', 'quiz page folder literal');
+    eq(injected(), 0, 'quiz page with a folder: nothing injected');
+    await hubVia('d1');
 
     click('hub-words');
     await onScreen('browse');
@@ -1973,7 +2160,7 @@
     click('open-settings');
     await onScreen('settings');
     ok(act('theme-auto') && $('#pref-rate') && act('export-backup') && act('restore-backup') && act('clear-all'), 'settings controls');
-    ok(/版本\s*2\.1/.test(text($('main'))), 'version 2.1 shown');
+    ok(/版本\s*3\.0/.test(text($('main'))), 'version 3.0 shown');
     if (act('voice-test')) ok(/字卡和選擇題出現英文時自動唸出來/.test(text($('main'))), '自動朗讀 hint');
     ok(/加入主畫面/.test(text($('main'))) && /安裝應用程式/.test(text($('main'))), 'add-to-home-screen tips');
     ok(!/複習|學習進度|每日/.test(text($('main'))), 'no spaced-repetition wording');
@@ -1987,8 +2174,15 @@
     await onScreen('deck');
     eq(text($('.topbar-title')), '範例・高中常用單字', 'a v1 #/study/<id> link opens the deck');
     W().location.hash = '#/quiz/' + encodeURIComponent(deckId) + '/nope';
-    await onScreen('deck');
-    ok(true, 'an unknown quiz kind opens the deck');
+    await onScreen('quiz-setup');
+    eq([W().location.hash, S().prefs.quizSetup.mode, S().prefs.quizSetup.deckIds], ['#/quiz', 'choice', [deckId]],
+      'an unknown quiz kind: the quiz page with the deck chosen, the kind unchanged');
+    W().location.hash = '#/quiz/run';
+    await onScreen('quiz-setup');
+    eq(W().location.hash, '#/quiz', '#/quiz/run without a quiz going on: the quiz page');
+    W().location.hash = '#/folder/nope';
+    await onScreen('home');
+    ok(toasts().indexOf('找不到這個資料夾') >= 0, 'unknown folder → home with a toast');
     W().location.hash = '#/';
     await onScreen('home');
 
@@ -2037,8 +2231,26 @@
     const deckId = S().decks[0].id;
     await sleep(400);
     await openApp({ sk: sk, keep: true, clock: T0, hash: '#/quiz/' + encodeURIComponent(deckId) + '/choice' });
-    eq([screenName(), quizCount()], ['quiz', '1 / 10'], 'deep link starts a quiz');
+    await onScreen('quiz-setup');
+    eq([W().location.hash, W().history.state && W().history.state.idx], ['#/quiz', 0], 'a v2 quiz link opens the quiz page in place');
+    eq(pickRow(deckId).getAttribute('aria-checked'), 'true', 'with its deck chosen');
+    click('quiz-start');
+    await onScreen('quiz');
+    eq(quizCount(), '1 / 10', 'one tap to start');
     click('quiz-quit');
+    await onScreen('quiz-setup');
+    click('tab-decks');
+    await onScreen('home');
+    eq([location.href, W().history.state.idx], [page, 0], 'the 牌組 tab: home in place of the first entry, still on the test page');
+
+    // Opened on the quiz page: the 牌組 tab and back never leave the app either.
+    await openApp({ sk: sk, keep: true, clock: T0, hash: '#/quiz' });
+    await onScreen('quiz-setup');
+    click('quiz-start');
+    await onScreen('quiz');
+    click('quiz-quit');
+    await onScreen('quiz-setup');
+    click('tab-decks');
     await onScreen('home');
     eq(location.href, page, 'still on the test page');
 
@@ -2077,6 +2289,906 @@
     }
     eq(screenName(), 'home', 'repeated 「←」 ends on home');
     eq(location.href, page, 'never left the app');
+    noAppErrors();
+  });
+
+  /* ------------------------------------------- v3: tab bar, folders, the quiz page */
+
+  /** n made-up words (prefix + aa, ab, …), each with its own meaning and an example that contains it. */
+  function madeUpWords(prefix, n) {
+    const L = 'abcdefghijklmnopqrstuvwxyz';
+    const G1 = '甲乙丙丁戊己庚辛壬癸';
+    const G2 = '子丑寅卯辰巳午未申酉戌亥';
+    return Array.from({ length: n }, (_, i) => {
+      const w = prefix + L[Math.floor(i / 26) % 26] + L[i % 26];
+      return w + ' | n. ' + G1[i % 10] + G2[Math.floor(i / 10) % 12] + '字 | I saw a ' + w + ' today. | 我今天看到了它。';
+    }).join('\n');
+  }
+
+  /** WORDS[from, to) as lines with examples (like wordsText). */
+  function wordLines(from, to) {
+    return WORDS.slice(from, to).map((p) => p[0] + ' | n. ' + p[1] + ' | The ' + p[0] + ' is here. | ' + p[1] + '在這裡。').join('\n');
+  }
+
+  // Folder B3: A (12 words), B (2 phrases, well-being, o'clock, abandon sth, and take with "took"); C outside (40 words).
+  const QUIZ_BOOK = () => [
+    '#folder: B3',
+    '#deck: A', wordsText(12),
+    '#deck: B',
+    'give up | phr. 放棄 | Never give up on your dreams. | 永遠不要放棄你的夢想。',
+    'look forward to | phr. 期待 | I look forward to the trip. | 我期待這趟旅行。',
+    'well-being | n. 幸福 | Sleep helps your well-being. | 睡眠有益身心。',
+    'o\'clock | adv. …點鐘 | It is three o\'clock. | 三點了。',
+    'abandon sth | v. 放棄某事 | He abandoned the plan. | 他放棄了計畫。',
+    'take | v. 拿 | He took it. | 他拿走了。',
+    '#folder:',
+    '#deck: C', madeUpWords('zo', 40),
+  ].join('\n');
+
+  async function newFolderByPrompt(action, name) {
+    click(action);
+    await waitFor(modalOpen, 'name prompt');
+    await sleep(40);
+    setValue($('#modal-input'), name, 'folder name');
+    click('modal-ok');
+    await overlaysGone();
+  }
+
+  /** The deck's ⋯ → 移動到資料夾 sheet. */
+  async function openMoveSheet(deckId) {
+    click($('[data-action="deck-menu"][data-deck-id="' + deckId + '"]'), 'deck-menu ' + deckId);
+    await waitFor(() => sheetOpen() && act('deck-move'), 'deck menu');
+    await sleep(60);
+    click('deck-move');
+    await waitFor(() => sheetOpen() && act('move-to-folder'), 'move sheet');
+    await sleep(60);
+  }
+
+  test('tab bar: 牌組 · 測驗 on the top-level screens only; switching does not pile up history', async function () {
+    await openApp({ clock: T0 });
+    ok(tabBarShown(), 'shown on the empty 牌組 page');
+    eq($$('nav.tabbar .tab').map((b) => [b.getAttribute('data-action'), text(b)]), [['tab-decks', '牌組'], ['tab-quiz', '測驗']],
+      'two tabs: 牌組 · 測驗');
+    ok($$('nav.tabbar .tab').every((b) => b.querySelector('svg') && b.offsetHeight >= 56), 'with icons, at least 56px tall');
+    eq([act('tab-decks').getAttribute('aria-current'), act('tab-quiz').getAttribute('aria-current')], ['page', null], '牌組 is current');
+    click('tab-quiz');
+    await onScreen('quiz-setup');
+    ok($('#quiz-no-decks') && act('open-import'), 'no deck yet: the quiz page says so, with 匯入單字');
+    click('open-import');
+    await onScreen('import');
+    ok(!tabBarShown(), 'import: no tab bar');
+    click('back');
+    await onScreen('quiz-setup');
+    click('tab-decks');
+    await onScreen('home');
+
+    seedSample();
+    const deckId = S().decks[0].id;
+    W().VCApp.importText('#folder: 課本\n#deck: L1\napple | n. 蘋果', {});
+    const folderId = S().folders[0].id;
+    await waitFor(() => act('open-import'), 'home with decks');
+    const bar = $('nav.tabbar');
+    const barTop = () => bar.getBoundingClientRect().top;
+    eq(W().getComputedStyle(bar).position, 'fixed', 'fixed at the bottom');
+    ok(Math.abs(bar.getBoundingClientRect().bottom - W().innerHeight) < 1, 'at the very bottom');
+    ok(act('open-import').getBoundingClientRect().bottom <= barTop() + 1, '「＋ 匯入單字」 sits right above the tab bar (one tap away)');
+
+    click('tab-quiz');
+    await onScreen('quiz-setup');
+    eq([W().location.hash, W().history.state.idx], ['#/quiz', 1], '測驗: #/quiz, one entry on top of 牌組');
+    eq([act('tab-quiz').getAttribute('aria-current'), act('tab-decks').getAttribute('aria-current')], ['page', null], '測驗 is current');
+    ok(!act('back') && act('quiz-start'), 'a top-level page: no back button');
+    ok(act('quiz-start').getBoundingClientRect().bottom <= barTop() + 1, '開始測驗 right above the tab bar');
+    click('tab-quiz');
+    await sleep(60);
+    eq([screenName(), W().history.state.idx], ['quiz-setup', 1], 'the current tab again: nothing new');
+    click('tab-decks');
+    await onScreen('home');
+    eq(W().history.state.idx, 0, '牌組: back to the first entry (no stack growth)');
+    click('tab-quiz');
+    await onScreen('quiz-setup');
+    W().history.back();
+    await onScreen('home');
+    ok(true, 'Android back from 測驗 → 牌組');
+    for (let i = 0; i < 3; i++) {
+      click('tab-quiz');
+      await onScreen('quiz-setup');
+      click('tab-decks');
+      await onScreen('home');
+    }
+    eq(W().history.state.idx, 0, 'switching back and forth: still one entry');
+
+    // The folder page is part of 牌組.
+    click($('[data-action="folder-open"][data-folder-id="' + folderId + '"]'), 'folder-open');
+    await onScreen('folder');
+    ok(tabBarShown() && act('tab-decks').getAttribute('aria-current') === 'page', 'folder page: tab bar, 牌組 current');
+    ok(act('back'), '… and its back button');
+    click('tab-quiz');
+    await onScreen('quiz-setup');
+    eq(W().history.state.idx, 1, '測驗 from a folder: takes the folder page’s place');
+    W().history.back();
+    await onScreen('home');
+    click($('[data-action="folder-open"][data-folder-id="' + folderId + '"]'), 'folder-open');
+    await onScreen('folder');
+    click('tab-decks');
+    await onScreen('home');
+    eq(W().history.state.idx, 0, '牌組 from a folder: back to 牌組');
+
+    // Hidden on every other screen (they have their back button).
+    await openDeck(deckId);
+    ok(!tabBarShown(), 'hub: no tab bar');
+    click('hub-cards');
+    await onScreen('cards');
+    ok(!tabBarShown(), 'flashcards: none');
+    click('back');
+    await onScreen('deck');
+    click('hub-words');
+    await onScreen('browse');
+    ok(!tabBarShown(), 'browse: none');
+    click('back');
+    await onScreen('deck');
+    await quizFromHub('choice');
+    ok(!tabBarShown(), 'a quiz: none');
+    click('quiz-quit');
+    await onScreen('quiz-setup');
+    ok(tabBarShown(), 'the quiz page: shown again');
+    click('tab-decks');
+    await onScreen('home');
+    click('open-settings');
+    await onScreen('settings');
+    ok(!tabBarShown(), 'settings: none');
+    click('back');
+    await onScreen('home');
+    ok(tabBarShown(), 'home: shown');
+    // Sheets and dialogs cover it.
+    await openSheetBy('deck-menu');
+    ok(+W().getComputedStyle(sheetOpen()).zIndex > +W().getComputedStyle(bar).zIndex, 'a sheet is above the tab bar');
+    click('sheet-close');
+    await overlaysGone();
+    noAppErrors();
+  });
+
+  test('folders: create, duplicate names, move decks in and out, the folder page, rename, delete keeps the decks', async function () {
+    await openApp({ clock: T0 });
+    const a = await importWords(5, 'L1');
+    const b = await importWords(3, 'L2');
+    const c = await importWords(2, 'L3');
+    await waitFor(() => $$('.deck-row').length === 3, 'three decks');
+
+    // 新增資料夾 (next to 建立空白牌組)
+    eq($$('.list-foot button').map((x) => [x.getAttribute('data-action'), text(x)]), [['new-deck', '建立空白牌組'], ['new-folder', '新增資料夾']],
+      'under the list: 建立空白牌組 · 新增資料夾');
+    click('new-folder');
+    const m = await waitFor(modalOpen, 'name prompt');
+    eq(text(m.querySelector('h3')), '新增資料夾', 'prompt title');
+    setValue($('#modal-input'), '  龍騰 B3  ', 'folder name');
+    click('modal-ok');
+    await overlaysGone();
+    let s = S();
+    eq(s.folders.map((f) => [f.name, f.created]), [['龍騰 B3', T0]], 'folder made (name trimmed)');
+    const f1 = s.folders[0].id;
+    ok(toasts().indexOf('已新增資料夾「龍騰 B3」') >= 0, 'toast', JSON.stringify(toasts()));
+    eq($$('.section-title').map(text), ['資料夾', '牌組'], 'home: 資料夾 first, then the decks outside');
+    eq([text($('.folder-row .deck-name')), text($('.folder-row .folder-meta'))], ['龍騰 B3', '0 個牌組 · 0 字'], 'the folder row');
+    ok($('.folder-row .folder-icon svg') && $('.folder-row [data-action="folder-menu"]'), 'with a folder icon and ⋯');
+
+    // The same name again (case, full / half width and spaces do not count), or no name: refused.
+    for (const name of ['龍騰ｂ３', '龍騰B3', '   ']) await newFolderByPrompt('new-folder', name);
+    eq(S().folders.length, 1, 'no second folder');
+    ok(toasts().indexOf('已經有「龍騰 B3」資料夾了') >= 0, 'a taken name: toast', JSON.stringify(toasts()));
+    ok(toasts().indexOf('請輸入資料夾名稱') >= 0, 'no name: toast', JSON.stringify(toasts()));
+
+    // 移動到資料夾 (the deck's ⋯)
+    await openMoveSheet(a);
+    eq(text(sheetOpen().querySelector('.sheet-title')), '把「L1」移動到', 'move sheet title');
+    eq(Array.from(sheetOpen().querySelectorAll('.menu-item')).map((x) => [x.getAttribute('data-action'), text(x), x.getAttribute('aria-pressed')]),
+      [['move-to-folder', '不放資料夾', 'true'], ['move-to-folder', '龍騰 B3', 'false'], ['move-new-folder', '新增資料夾', null]],
+      'not in a folder: 不放資料夾 checked; every folder; 新增資料夾');
+    click($('[data-action="move-to-folder"][data-folder-id="' + f1 + '"]'), 'move to 龍騰 B3');
+    await overlaysGone();
+    eq(deckNamed(S(), 'L1').folderId, f1, 'L1 is in the folder');
+    ok(toasts().indexOf('已移到「龍騰 B3」') >= 0, 'toast', JSON.stringify(toasts()));
+    ok(!$('[data-deck-row="' + a + '"]'), 'L1 left the list of decks outside folders');
+    eq(text($('.folder-row .folder-meta')), '1 個牌組 · 5 字', 'the folder counts it');
+
+    // 移動到資料夾 → 新增資料夾: a taken name moves nothing; a new one is made and the deck goes in.
+    await openMoveSheet(b);
+    click('move-new-folder');
+    await waitFor(modalOpen, 'name prompt');
+    await sleep(40);
+    setValue($('#modal-input'), '龍騰 b3', 'taken name');
+    click('modal-ok');
+    await overlaysGone();
+    eq([S().folders.length, deckNamed(S(), 'L2').folderId], [1, null], 'a taken name: no folder made, the deck stays');
+    await openMoveSheet(b);
+    click('move-new-folder');
+    await waitFor(modalOpen, 'name prompt');
+    await sleep(40);
+    setValue($('#modal-input'), 'B4', 'new name');
+    click('modal-ok');
+    await overlaysGone();
+    s = S();
+    const f2 = (s.folders.find((f) => f.name === 'B4') || {}).id;
+    eq(deckNamed(s, 'L2').folderId, f2, 'L2 moved into the new folder B4');
+    eq($$('.folder-row .deck-name').map(text), ['龍騰 B3', 'B4'], 'folders in the order they were made');
+
+    // Deck settings: the 資料夾 select.
+    click($('[data-action="deck-menu"][data-deck-id="' + c + '"]'), 'deck-menu L3');
+    await waitFor(() => act('sheet-settings'), 'deck menu');
+    await sleep(60);
+    click('sheet-settings');
+    await waitFor(() => $('#ds-folder'), 'deck settings');
+    eq(Array.from($('#ds-folder').options).map((o) => o.textContent), ['不放資料夾', '龍騰 B3', 'B4'], 'deck settings: 資料夾 select');
+    eq($('#ds-folder').value, '', 'L3: 不放資料夾');
+    setValue($('#ds-folder'), f2, 'B4');
+    click('ds-save');
+    await overlaysGone();
+    eq(deckNamed(S(), 'L3').folderId, f2, 'moved through deck settings');
+    eq($$('.section-title').map(text), ['資料夾'], 'every deck in a folder: only 資料夾 on home');
+
+    // The folder page.
+    click($('[data-action="folder-open"][data-folder-id="' + f2 + '"]'), 'folder-open B4');
+    await onScreen('folder');
+    eq([W().location.hash, text($('.topbar-title'))], ['#/folder/' + encodeURIComponent(f2), 'B4'], 'route #/folder/<id>, the folder name on top');
+    ok(act('back') && act('folder-menu'), 'back · ⋯');
+    eq(text($('#folder-count')), '2 個牌組 · 5 字', 'decks and words');
+    eq($$('.deck-row .deck-name').map(text), ['L2', 'L3'], 'its decks (deck rows)');
+    eq([text(act('folder-import')), text(act('folder-quiz'))], ['匯入單字', '測驗這個資料夾'], 'bottom: 匯入單字 · 測驗這個資料夾');
+    ok(act('new-deck'), '建立空白牌組 here too');
+    await openDeck(b);
+    click('back');
+    await onScreen('folder');
+    ok(true, 'a deck opened from the folder goes back to the folder');
+
+    // The move sheet from the folder page: the folder it is in is checked; 不放資料夾 moves it out.
+    await openMoveSheet(c);
+    const cur = sheetOpen().querySelector('[data-action="move-to-folder"][aria-pressed="true"]');
+    eq([cur && cur.getAttribute('data-folder-id'), !!(cur && cur.querySelector('.menu-check'))], [f2, true], 'its folder is checked');
+    click($('[data-action="move-to-folder"][data-folder-id="none"]'), '不放資料夾');
+    await overlaysGone();
+    eq(deckNamed(S(), 'L3').folderId, null, 'moved out');
+    ok(toasts().indexOf('已移出資料夾') >= 0, 'toast', JSON.stringify(toasts()));
+    eq([$$('.deck-row .deck-name').map(text), text($('#folder-count'))], [['L2'], '1 個牌組 · 3 字'], 'the folder page shows what is left');
+
+    // Folder ⋯: 重新命名 · 測驗這個資料夾 · 刪除資料夾
+    await openSheetBy('folder-menu');
+    eq(text($('.sheet-title')), 'B4', 'menu title');
+    eq($$('.sheet .menu-item').map((x) => x.getAttribute('data-action')), ['folder-rename', 'folder-quiz', 'folder-delete'], 'folder menu');
+    click('folder-rename');
+    await waitFor(modalOpen, 'rename prompt');
+    await sleep(40);
+    eq($('#modal-input').value, 'B4', 'prefilled with the name');
+    setValue($('#modal-input'), '龍騰Ｂ3', 'taken name');
+    click('modal-ok');
+    await overlaysGone();
+    eq(S().folders.find((f) => f.id === f2).name, 'B4', 'a taken name is refused');
+    await openSheetBy('folder-menu');
+    click('folder-rename');
+    await waitFor(modalOpen, 'rename prompt');
+    await sleep(40);
+    setValue($('#modal-input'), ' 龍騰 B4 ', 'new name');
+    click('modal-ok');
+    await overlaysGone();
+    eq([S().folders.find((f) => f.id === f2).name, text($('.topbar-title'))], ['龍騰 B4', '龍騰 B4'], 'renamed');
+    ok(toasts().indexOf('已重新命名') >= 0, 'toast', JSON.stringify(toasts()));
+
+    // Delete the folder on its page: its deck goes outside, no word is lost.
+    const words = S().cards.length;
+    await openSheetBy('folder-menu');
+    click('folder-delete');
+    const dm = await waitFor(modalOpen, 'delete confirm');
+    await sleep(40);
+    eq([text(dm.querySelector('h3')), text(dm.querySelector('p'))], ['刪除資料夾「龍騰 B4」？', '裡面的 1 個牌組會移到外面，單字不會被刪除。'],
+      'the dialog says what happens');
+    await modalAnswer(true);
+    await onScreen('home');
+    s = S();
+    eq([s.folders.map((f) => f.name), deckNamed(s, 'L2').folderId, s.cards.length], [['龍騰 B3'], null, words], 'folder gone, L2 outside, every word kept');
+    ok(toasts().indexOf('已刪除資料夾') >= 0, 'toast', JSON.stringify(toasts()));
+    ok($('[data-deck-row="' + b + '"]') && $('[data-deck-row="' + c + '"]'), 'L2 and L3 on 牌組');
+
+    // Delete from home (the folder row's ⋯); its deck stays.
+    click($('[data-action="folder-menu"][data-folder-id="' + f1 + '"]'), 'folder-menu');
+    await waitFor(() => act('folder-delete'), 'folder menu');
+    await sleep(60);
+    click('folder-delete');
+    await modalAnswer(true);
+    await overlaysGone();
+    eq([S().folders.length, deckNamed(S(), 'L1').folderId, S().cards.length], [0, null, words], 'deleted from home too: L1 outside, nothing lost');
+    eq($$('.section-title').map(text), ['我的牌組'], 'no folder left: the plain list again');
+    noAppErrors();
+  });
+
+  test('folders: #folder: import (several folders), the 資料夾 select, decks matched inside their folder', async function () {
+    await openApp({ clock: T0 });
+    click('empty-paste');
+    await onScreen('import');
+    ok(!$('#import-folder'), 'nothing to import yet: no 資料夾 select');
+    const BOOKS = ['#folder: 龍騰英文 第三冊', '#deck: B3 L1', 'apple | n. 蘋果', '#deck: B3 L2', 'bridge | n. 橋',
+      '＃FOLDER：龍騰英文 第四冊', '#deck: B4 L1', 'candle | n. 蠟燭', '#folder:', '#deck: 其他', 'desert | n. 沙漠'].join('\n');
+    setValue($('#import-text'), BOOKS, 'paste');
+    eq(text($('#import-summary')), '可匯入 4 張', '#folder: lines are neither cards nor errors');
+    const secs = () => $$('.sections li').map((li) => [text(li.querySelector('.sec-name')), text(li.querySelector('.sec-folder')), text(li.querySelector('.sec-tag'))]);
+    eq(secs(), [['B3 L1', '龍騰英文 第三冊（新資料夾）', '新牌組'], ['B3 L2', '龍騰英文 第三冊（新資料夾）', '新牌組'],
+      ['B4 L1', '龍騰英文 第四冊（新資料夾）', '新牌組'], ['其他', null, '新牌組']], 'preview: each deck with its folder');
+    ok($('#import-folder'), '資料夾 select: for the deck the file puts in no folder');
+    eq(Array.from($('#import-folder').options).map((o) => [o.value, o.textContent]), [['', '不放資料夾'], ['add', '新增資料夾…']],
+      'options before any folder exists');
+    click('import-confirm');
+    await onScreen('home');
+    let s = S();
+    const fid = (name) => (S().folders.find((f) => f.name === name) || {}).id;
+    const folderOf = (d) => (d.folderId ? S().folders.find((f) => f.id === d.folderId).name : null);
+    eq(s.folders.map((f) => f.name), ['龍騰英文 第三冊', '龍騰英文 第四冊'], 'two folders made');
+    eq(s.decks.map((d) => [d.name, folderOf(d)]), [['B3 L1', '龍騰英文 第三冊'], ['B3 L2', '龍騰英文 第三冊'], ['B4 L1', '龍騰英文 第四冊'], ['其他', null]],
+      'every deck in its folder (an empty #folder: = none)');
+    ok(toasts().some((t) => t.indexOf('已匯入 4 張（4 個牌組）') >= 0), 'toast', JSON.stringify(toasts()));
+    eq($$('.folder-row .folder-meta').map(text), ['2 個牌組 · 2 字', '1 個牌組 · 1 字'], 'folder rows count their decks and words');
+    ok($$('.folder-row').every((r) => r.classList.contains('flash')) && $('[data-deck-row].flash'), 'the imported decks (and their folders) are highlighted');
+
+    // The same deck name in another folder is another deck; in its own folder it is matched (case-insensitive).
+    W().VCApp.importText('#folder: 龍騰英文 第四冊\n#deck: B3 L1\neagle | n. 老鷹', {});
+    W().VCApp.importText('#folder: 龍騰英文第三冊\n#deck: b3 l1\nfrog | n. 青蛙', {});
+    s = S();
+    eq(s.decks.filter((d) => d.name === 'B3 L1').map((d) => [folderOf(d), cardsOf(s, d.id).map((x) => x.word)]),
+      [['龍騰英文 第三冊', ['apple', 'frog']], ['龍騰英文 第四冊', ['eagle']]], 'decks are matched inside their folder');
+    eq(s.folders.length, 2, 'folder names match loosely (spaces): no new folder');
+
+    // Several new decks, all in one folder: that folder's page opens.
+    click('open-import');
+    await onScreen('import');
+    setValue($('#import-text'), '#folder: 多益\n#deck: 第 1 週\ngrape | n. 葡萄\n#deck: 第 2 週\nhoney | n. 蜂蜜', 'paste');
+    ok(!$('#import-folder'), 'every new deck has its #folder:: no 資料夾 select');
+    click('import-confirm');
+    await onScreen('folder');
+    eq([text($('.topbar-title')), $$('.deck-row .deck-name').map(text)], ['多益', ['第 1 週', '第 2 週']], 'its page, with the new decks');
+    click('back');
+    await onScreen('home');
+
+    // The 資料夾 select: 不放資料夾 / every folder / 新增資料夾….
+    click('open-import');
+    await onScreen('import');
+    setValue($('#import-text'), 'iris | n. 鳶尾花', 'paste');
+    const sel = $('#import-folder');
+    eq(Array.from(sel.options).map((o) => o.textContent), ['不放資料夾', '龍騰英文 第三冊', '龍騰英文 第四冊', '多益', '新增資料夾…'],
+      'options: none, every folder, 新增資料夾…');
+    eq(sel.value, '', '不放資料夾 by default');
+    ok(/新的牌組會放進這個資料夾/.test(text(sel.closest('.field'))), 'explained');
+    setValue(sel, 'add', '新增資料夾…');
+    await waitFor(modalOpen, 'name prompt');
+    await sleep(40);
+    setValue($('#modal-input'), '  自己的單字 ', 'name');
+    click('modal-ok');
+    await overlaysGone();
+    eq([$('#import-folder').value, text($('#import-folder').selectedOptions[0])], ['new', '自己的單字（新資料夾）'], 'the new name is chosen');
+    eq(text($('.sections li .sec-folder')), '自己的單字（新資料夾）', 'preview');
+    eq(S().folders.length, 3, 'nothing made before 匯入');
+    click('import-confirm');
+    await onScreen('deck');
+    s = S();
+    eq([s.folders.length, folderOf(deckNamed(s, '我的單字'))], [4, '自己的單字'], 'made with the import; the new deck in it');
+    click('back');
+    await onScreen('home');
+
+    // 新增資料夾… with the name of a folder that exists: that folder.
+    click('open-import');
+    await onScreen('import');
+    setValue($('#import-text'), 'jade | n. 玉', 'paste');
+    ok(!$('#import-folder'), 'the words go into the deck 我的單字 that exists: no 資料夾 select');
+    setValue($('.import-deck-name'), '寶石', 'deck name');
+    setValue($('#import-folder'), 'add', '新增資料夾…');
+    await waitFor(modalOpen, 'name prompt');
+    await sleep(40);
+    setValue($('#modal-input'), '多益', 'existing name');
+    click('modal-ok');
+    await overlaysGone();
+    ok(toasts().indexOf('已經有「多益」資料夾，新牌組會放進這裡') >= 0, 'toast', JSON.stringify(toasts()));
+    eq($('#import-folder').value, fid('多益'), 'that folder is chosen');
+    // Into an existing deck: it keeps its folder, so there is nothing to choose.
+    setValue($('#import-target'), deckNamed(S(), '其他').id, 'target');
+    ok(!$('#import-folder'), 'into an existing deck: no 資料夾 select');
+    setValue($('#import-target'), 'new', 'target');
+    setValue($('#import-text'), '', 'clear');
+    click('back');
+    await onScreen('home');
+
+    // VCApp.importText({ folderId }) puts new decks into that folder.
+    W().VCApp.importText('kiwi | n. 奇異果', { deckName: 'API', folderId: fid('多益') });
+    eq(folderOf(deckNamed(S(), 'API')), '多益', 'importText folderId');
+    noAppErrors();
+  });
+
+  test('folders: an empty folder, importing from a folder page, a #folder: line wins, export writes #folder:', async function () {
+    await openApp({ clock: T0 });
+    W().VCApp.importText('#folder: 龍騰英文 第三冊\n#deck: B3 L1\napple | n. 蘋果\n#folder: 龍騰英文 第四冊\n#deck: B4 L1\ncandle | n. 蠟燭', {});
+    const s0 = S();
+    s0.folders.push({ id: 'empty1', name: '空資料夾', created: T0 + 5 });
+    W().VCApp.setState(s0);
+    const fid = (name) => (S().folders.find((f) => f.name === name) || {}).id;
+    const third = fid('龍騰英文 第三冊');
+
+    // An empty folder: a friendly hint, 匯入單字到這個資料夾, 建立空白牌組; nothing to test.
+    click($('[data-action="folder-open"][data-folder-id="empty1"]'), 'folder-open');
+    await onScreen('folder');
+    ok($('#folder-empty'), 'empty folder: a hint');
+    eq(text($('#folder-empty h2')), '這個資料夾還是空的', 'hint title');
+    eq([text($('#folder-empty [data-action="folder-import"]')), text($('#folder-empty [data-action="new-deck"]'))],
+      ['匯入單字到這個資料夾', '建立空白牌組'], 'two ways to fill it');
+    ok(!act('folder-quiz') && !$('#folder-count'), 'no 測驗這個資料夾 without words');
+    await openSheetBy('folder-menu');
+    eq($$('.sheet .menu-item').map((x) => x.getAttribute('data-action')), ['folder-rename', 'folder-delete'], 'its menu: no 測驗這個資料夾 either');
+    click('sheet-close');
+    await overlaysGone();
+    click($('#folder-empty [data-action="new-deck"]'), 'new-deck');
+    await waitFor(modalOpen, 'name prompt');
+    await sleep(40);
+    setValue($('#modal-input'), '自己的牌組', 'deck name');
+    click('modal-ok');
+    await onScreen('deck');
+    eq(deckNamed(S(), '自己的牌組').folderId, 'empty1', 'a blank deck made here is in the folder');
+    click('back');
+    await onScreen('folder');
+    eq($$('.deck-row .deck-name').map(text), ['自己的牌組'], 'listed in the folder');
+    ok(act('folder-import') && act('folder-import').classList.contains('btn-primary') && !act('folder-quiz'),
+      'a folder without words: 匯入單字 is the main button, no 測驗');
+    click('back');
+    await onScreen('home');
+
+    // 匯入單字 on a folder page: that folder chosen, shown before anything is pasted.
+    click($('[data-action="folder-open"][data-folder-id="' + third + '"]'), 'folder-open');
+    await onScreen('folder');
+    click('folder-import');
+    await onScreen('import');
+    ok($('#import-folder') && $('#import-folder').value === third, 'opened from a folder: its folder chosen, shown right away');
+    setValue($('#import-text'), 'kiwi | n. 奇異果', 'paste');
+    setValue($('.import-deck-name'), 'B3 L2', 'deck name');
+    eq(text($('.sections li .sec-folder')), '龍騰英文 第三冊', 'preview: into that folder');
+    click('import-confirm');
+    await onScreen('deck');
+    eq(deckNamed(S(), 'B3 L2').folderId, third, 'the new deck is in that folder');
+    click('back');
+    await onScreen('folder');
+    eq($$('.deck-row .deck-name').map(text), ['B3 L1', 'B3 L2'], 'back on the folder page: both lessons');
+    // A #folder: line in the text wins over the folder chosen.
+    click('folder-import');
+    await onScreen('import');
+    setValue($('#import-text'), '#folder: 龍騰英文 第四冊\n#deck: B4 L2\nlemon | n. 檸檬', 'paste');
+    ok(!$('#import-folder'), 'the text says the folder: no select');
+    eq(text($('.sections li .sec-folder')), '龍騰英文 第四冊', 'preview: the folder of the file');
+    click('import-confirm');
+    await onScreen('deck');
+    eq(deckNamed(S(), 'B4 L2').folderId, fid('龍騰英文 第四冊'), '#folder: wins');
+    // A word without #deck when opened from the folder page goes into an existing deck there by name.
+    click('back');
+    await onScreen('folder');
+
+    // 測驗這個資料夾 (bottom button) → the quiz page with the folder's decks.
+    click('folder-quiz');
+    await onScreen('quiz-setup');
+    eq(S().prefs.quizSetup.deckIds, [deckNamed(S(), 'B3 L1').id, deckNamed(S(), 'B3 L2').id], 'the folder’s decks chosen');
+    W().history.back();
+    await onScreen('folder');
+
+    // Export: a deck in a folder writes #folder: before #deck:, and comes back into a folder of that name.
+    const captured = captureDownloads();
+    click($('[data-action="deck-menu"][data-deck-id="' + deckNamed(S(), 'B3 L1').id + '"]'), 'deck-menu');
+    await waitFor(() => act('sheet-export'), 'deck menu');
+    await sleep(60);
+    click('sheet-export');
+    await waitFor(() => captured.length === 1, 'download');
+    const txt = await captured[0].blob.text();
+    ok(txt.indexOf('#folder: 龍騰英文 第三冊\n#deck: B3 L1\n') === 0, 'starts with #folder: and #deck:', txt.slice(0, 60));
+    const parsed = VC().parseDeckText(txt, {});
+    eq([parsed.errors, parsed.decks.map((d) => [d.name, d.folder, d.cards.map((x) => x.word)])], [[], [['B3 L1', '龍騰英文 第三冊', ['apple']]]],
+      'round-trips through VC.parseDeckText');
+    await overlaysGone();
+    await openApp({ clock: T0 });
+    W().VCApp.importText(txt, {});
+    const s = S();
+    eq([s.folders.map((f) => f.name), s.decks.map((d) => d.name), s.decks[0].folderId === s.folders[0].id], [['龍騰英文 第三冊'], ['B3 L1'], true],
+      'imported elsewhere: the same folder and deck');
+    // A deck outside any folder exports as before (no #folder:).
+    W().VCApp.importText('mango | n. 芒果', { deckName: '外面' });
+    ok(VC().serializeDeck('外面', cardsOf(S(), deckNamed(S(), '外面').id), '').indexOf('#deck: 外面\n') === 0, 'no folder: #deck: first, as in v2');
+    noAppErrors();
+  });
+
+  test('quiz page: 題型, decks by folder (tri-state), 全選 / 全部取消, counts per kind, 題數; the setup is remembered', async function () {
+    const sk = await openApp({ clock: T0 });
+    W().VCApp.importText(QUIZ_BOOK(), {});
+    const s = S();
+    const [A, B, C] = ['A', 'B', 'C'].map((n) => deckNamed(s, n).id);
+    const F = s.folders[0].id;
+    click('tab-quiz');
+    await onScreen('quiz-setup');
+    eq(text($('.app-title')), '測驗', 'title');
+    eq($$('.mode-opt').map((x) => [x.getAttribute('data-action'), text(x), x.getAttribute('aria-pressed')]),
+      [['quiz-mode-choice', '選擇題看英文選中文', 'true'], ['quiz-mode-spell', '拼字題看例句拼單字', 'false']], '題型: 選擇題 (default) · 拼字題, explained');
+    eq($$('.quiz-setup > .section-title, .quiz-setup .section-head .section-title').map(text).slice(0, 3), ['題型', '選擇牌組', '題數'], 'sections');
+    eq($$('[data-action="quiz-deck"]').map((x) => [x.getAttribute('data-deck-id'), x.getAttribute('role'), x.getAttribute('aria-checked')]),
+      [[A, 'checkbox', 'true'], [B, 'checkbox', 'true'], [C, 'checkbox', 'true']], 'every deck chosen at first (checkbox rows)');
+    eq([text(act('quiz-none')), act('quiz-all')], ['全部取消', null], 'everything chosen: the link says 全部取消');
+    const fp = () => folderPick(F);
+    eq([fp().getAttribute('role'), fp().getAttribute('aria-checked'), text(fp().querySelector('.pick-name')), text(fp().querySelector('.pick-meta'))],
+      ['checkbox', 'true', 'B3', '2 個牌組'], 'the folder row: a checkbox for its decks');
+    ok(pickRow(A).classList.contains('in-folder') && pickRow(B).classList.contains('in-folder') && !pickRow(C).classList.contains('in-folder'),
+      'A and B inside the folder, C outside');
+    eq(text($('.pick-label')), '未分類', 'decks outside folders: 未分類');
+    eq([pickMeta(A), pickMeta(B), pickMeta(C)], ['12 字', '6 字', '40 字'], '選擇題: N 字');
+    eq(quizSummary(), '已選 3 個牌組 · 可出 58 題', 'summary');
+    eq(countButtons(), [['quiz-count-10', '10', 'true'], ['quiz-count-20', '20', 'false'], ['quiz-count-50', '50', 'false'],
+      ['quiz-count-all', '全部 (58)', 'false']], '題數 10 / 20 / 50 / 全部 (58)');
+    ok(!act('quiz-start').disabled, '開始測驗 enabled');
+
+    // 拼字題: phrases (and examples without the word) are not counted.
+    click('quiz-mode-spell');
+    eq(act('quiz-mode-spell').getAttribute('aria-pressed'), 'true', '拼字題 chosen');
+    eq([pickMeta(A), pickMeta(B), pickMeta(C)], ['12 字', '6 字 · 可出 3 題', '40 字'], '拼字題: how many a deck can ask, when fewer');
+    eq(quizSummary(), '已選 3 個牌組 · 可出 55 題', 'summary');
+    eq(countButtons().pop(), ['quiz-count-all', '全部 (55)', 'false'], '全部 (55)');
+    eq(S().prefs.quizSetup.mode, 'spell', 'saved');
+
+    // One deck of the folder: the folder is partly chosen.
+    click(pickRow(B), 'B');
+    eq([pickRow(B).getAttribute('aria-checked'), fp().getAttribute('aria-checked'), text(fp().querySelector('.pick-meta'))],
+      ['false', 'mixed', '已選 1 / 2 個牌組'], 'one of two: mixed');
+    ok(fp().querySelector('.check svg'), 'mixed shows a mark');
+    eq(S().prefs.quizSetup.deckIds, [A, C], 'saved: the chosen decks');
+    eq(quizSummary(), '已選 2 個牌組 · 可出 52 題', 'summary follows');
+    eq([text(act('quiz-all')), act('quiz-none')], ['全選', null], 'not everything: 全選');
+    click(fp(), 'folder');
+    eq([fp().getAttribute('aria-checked'), pickRow(A).getAttribute('aria-checked'), pickRow(B).getAttribute('aria-checked')], ['true', 'true', 'true'],
+      'a tap on a partly chosen folder: all of it');
+    click(fp(), 'folder');
+    eq([fp().getAttribute('aria-checked'), pickRow(A).getAttribute('aria-checked'), pickRow(B).getAttribute('aria-checked'),
+      pickRow(C).getAttribute('aria-checked')], ['false', 'false', 'false', 'true'], 'again: none of it (C stays)');
+    eq(quizSummary(), '已選 1 個牌組 · 可出 40 題', 'summary');
+    click(fp(), 'folder');
+    eq(fp().getAttribute('aria-checked'), 'true', 'a tap on an unchosen folder: all of it');
+
+    // Close / open a folder.
+    const toggle = () => $('[data-action="quiz-folder-toggle"][data-folder-id="' + F + '"]');
+    eq(toggle().getAttribute('aria-expanded'), 'true', 'a small collection: folders open');
+    click(toggle(), 'toggle');
+    ok(toggle().getAttribute('aria-expanded') === 'false' && !pickRow(A) && !pickRow(B), 'closed: its decks hidden');
+    eq(fp().getAttribute('aria-checked'), 'true', '… still chosen');
+    click(toggle(), 'toggle');
+    ok(pickRow(A) && pickRow(B), 'open again');
+
+    // 全部取消 / 全選
+    click('quiz-none');
+    eq([S().prefs.quizSetup.deckIds, quizSummary()], [[], '請先選擇要測驗的牌組'], '全部取消: says to choose a deck');
+    ok($('#quiz-summary').classList.contains('warn') && act('quiz-start').disabled && !$('.count-seg'), 'warned, 開始測驗 disabled, no 題數');
+    click('quiz-all');
+    eq([S().prefs.quizSetup.deckIds, quizSummary()], [[A, B, C], '已選 3 個牌組 · 可出 55 題'], '全選');
+
+    // 題數: only the counts below what can be asked.
+    chooseDecks([C]);
+    eq(countButtons().map((x) => x[1]), ['10', '20', '全部 (40)'], '40 questions: no 50');
+    click('quiz-count-20');
+    eq([act('quiz-count-20').getAttribute('aria-pressed'), S().prefs.quizSetup.count], ['true', 20], '20 chosen and saved');
+    click('quiz-mode-choice');
+    eq(act('quiz-count-20').getAttribute('aria-pressed'), 'true', 'the count stays when the kind changes');
+    click('quiz-mode-spell');
+
+    // Remembered after a reload.
+    await sleep(400);
+    await openApp({ sk: sk, keep: true, clock: T0, hash: '#/quiz' });
+    await onScreen('quiz-setup');
+    eq(S().prefs.quizSetup, { mode: 'spell', deckIds: [C], count: 20 }, 'prefs.quizSetup saved');
+    eq([act('quiz-mode-spell').getAttribute('aria-pressed'), pickRow(C).getAttribute('aria-checked'), pickRow(A).getAttribute('aria-checked'),
+      act('quiz-count-20').getAttribute('aria-pressed')], ['true', 'true', 'false', 'true'], 'the same setup after a reload');
+    eq(toggle().getAttribute('aria-expanded'), 'true', 'few decks: the folder open');
+    await startFromSetup('spell');
+    eq(quizCount(), '1 / 20', '20 spelling questions');
+    eq(quizCard().deckId, C, 'from the chosen deck');
+    noAppErrors();
+  });
+
+  test('quiz page: opened from a deck / a folder / a link; empty, phrase-only and deleted decks; many decks', async function () {
+    await openApp({ clock: T0 });
+    W().VCApp.importText(QUIZ_BOOK(), {});
+    W().VCApp.importText('give in | phr. 讓步 | He gave in. | 他讓步了。\nput off | phr. 延後 | Don\'t put off your work. | 不要拖延。', { deckName: 'D' });
+    let s = S();
+    s.decks.push({ id: 'e1', name: 'E', created: T0 + 1, settings: { direction: 'en2zh' } });
+    W().VCApp.setState(s);
+    s = S();
+    const [A, B, C, D] = ['A', 'B', 'C', 'D'].map((n) => deckNamed(s, n).id);
+    const F = s.folders[0].id;
+    const qs = () => S().prefs.quizSetup;
+
+    // From a deck (hub 測驗) and from a folder (bottom button, ⋯ menu).
+    await openDeck(C);
+    await hubQuizPage();
+    eq(qs().deckIds, [C], 'hub 測驗: only that deck');
+    W().history.back();
+    await onScreen('deck');
+    click('back');
+    await onScreen('home');
+    click($('[data-action="folder-open"][data-folder-id="' + F + '"]'), 'folder-open');
+    await onScreen('folder');
+    click('folder-quiz');
+    await onScreen('quiz-setup');
+    eq([qs().deckIds, W().location.hash], [[A, B], '#/quiz'], '測驗這個資料夾: its decks');
+    W().history.back();
+    await onScreen('folder');
+    const s1 = S();
+    s1.prefs.quizSetup.deckIds = [C];
+    W().VCApp.setState(s1);
+    await openSheetBy('folder-menu');
+    click('folder-quiz');
+    await onScreen('quiz-setup');
+    eq(qs().deckIds, [A, B], 'the folder ⋯ menu: its decks');
+    W().history.back();
+    await onScreen('folder');
+    click('back');
+    await onScreen('home');
+
+    // Links: #/quiz?deck= (&mode=), ?folder=, the v2 #/quiz/<deck>/<mode>.
+    W().location.hash = '#/quiz?deck=' + encodeURIComponent(D) + '&mode=spell';
+    await onScreen('quiz-setup');
+    eq([W().location.hash, qs().mode, qs().deckIds], ['#/quiz', 'spell', [D]], '#/quiz?deck=&mode=: that deck and kind, shown as #/quiz');
+    eq([pickMeta(D), pickRow(D).classList.contains('dim')], ['2 字 · 沒有可出的題目', true], 'a phrase-only deck: nothing to spell, greyed');
+    eq(quizSummary(), '已選 1 個牌組 · 片語不考拼字，沒有可出的題目', 'the reason');
+    ok(act('quiz-start').disabled, '開始測驗 disabled');
+    click('quiz-mode-choice');
+    eq(quizSummary(), '已選 1 個牌組 · 可出 2 題', '選擇題 works (options from the other decks)');
+    W().location.hash = '#/quiz?folder=' + encodeURIComponent(F);
+    await waitFor(() => W().location.hash === '#/quiz' && qs().deckIds.length === 2, 'folder link');
+    eq([qs().deckIds, qs().mode], [[A, B], 'choice'], '#/quiz?folder=: its decks, the kind unchanged');
+    W().location.hash = '#/quiz/' + encodeURIComponent(A) + '/spell';
+    await waitFor(() => W().location.hash === '#/quiz' && qs().mode === 'spell', 'v2 link');
+    eq(qs().deckIds, [A], 'v2 #/quiz/<deck>/spell: that deck, 拼字題');
+    W().location.hash = '#/quiz?deck=nope';
+    await waitFor(() => W().location.hash === '#/quiz', 'unknown deck');
+    eq(qs().deckIds, [A], 'an unknown deck changes nothing');
+
+    // An empty deck.
+    chooseDecks(['e1']);
+    eq([pickMeta('e1'), pickRow('e1').classList.contains('dim'), quizSummary()], ['還沒有單字', true, '已選 1 個牌組 · 選的牌組還沒有單字'],
+      'an empty deck: greyed, the reason');
+    click(pickRow(A), 'A');
+    eq(quizSummary(), '已選 2 個牌組 · 可出 12 題', 'with another deck: its questions');
+
+    // Deleted decks are dropped from the setup; when every chosen deck is gone, every deck is chosen.
+    chooseDecks([A, C]);
+    click('tab-decks');
+    await onScreen('home');
+    click($('[data-action="deck-menu"][data-deck-id="' + C + '"]'), 'deck-menu C');
+    await waitFor(() => act('sheet-delete'), 'deck menu');
+    await sleep(60);
+    click('sheet-delete');
+    await modalAnswer(true);
+    await overlaysGone();
+    eq(qs().deckIds, [A], 'C deleted: dropped from the chosen decks');
+    s = S();
+    s.decks = s.decks.filter((d) => d.id !== A);
+    s.cards = s.cards.filter((c) => c.deckId !== A);
+    W().VCApp.setState(s);
+    eq(qs().deckIds, null, 'every chosen deck gone: back to every deck');
+    click('tab-quiz');
+    await onScreen('quiz-setup');
+    ok($$('[data-action="quiz-deck"]').every((x) => x.getAttribute('aria-checked') === 'true'), 'every deck chosen');
+
+    // Many decks: folders start closed, unless partly chosen.
+    W().VCApp.importText('#folder: G\n' + [1, 2, 3, 4, 5, 6].map((i) => '#deck: G' + i + '\n' + wordLines(i, i + 4)).join('\n'), {});
+    s = S();
+    const G = s.folders.find((f) => f.name === 'G').id;
+    s.prefs.quizSetup.deckIds = [B, deckNamed(s, 'G1').id];
+    W().VCApp.setState(s);
+    click('tab-decks');
+    await onScreen('home');
+    click('tab-quiz');
+    await onScreen('quiz-setup');
+    const ex = (f) => $('[data-action="quiz-folder-toggle"][data-folder-id="' + f + '"]').getAttribute('aria-expanded');
+    eq([S().decks.length, ex(F), ex(G)], [9, 'false', 'true'], 'more than 8 decks: a fully chosen folder closed, a partly chosen one open');
+    eq([folderPick(F).getAttribute('aria-checked'), folderPick(G).getAttribute('aria-checked')], ['true', 'mixed'], 'tri-state');
+    noAppErrors();
+  });
+
+  test('quiz run: several decks — questions only from them, the distractor rule, wrong words with their deck, 最近測驗, resume', async function () {
+    await openApp({ clock: T0 });
+    W().VCApp.importText('#folder: 課本\n#deck: 第一課\n' + wordLines(0, 8) + '\n#deck: 第二課\n' + wordLines(8, 16) + '\n#folder:\n#deck: 不考\n' + wordLines(16, 25), {});
+    let s = S();
+    const [L1, L2] = ['第一課', '第二課'].map((n) => deckNamed(s, n).id);
+    const F = s.folders[0].id;
+    seedRandom(6);
+    click($('[data-action="folder-open"][data-folder-id="' + F + '"]'), 'folder-open');
+    await onScreen('folder');
+    click('folder-quiz');
+    await onScreen('quiz-setup');
+    eq([S().prefs.quizSetup.deckIds, quizSummary()], [[L1, L2], '已選 2 個牌組 · 可出 16 題'], '測驗這個資料夾: both lessons');
+    await startFromSetup('choice', 'all');
+    eq(quizCount(), '1 / 16', 'every word of the two decks');
+    const chosenCards = cardsOf(S(), L1).concat(cardsOf(S(), L2));
+    const inQuiz = new Set(chosenCards.map((c) => c.id));
+    const meanings = new Set(chosenCards.map((c) => shown(c.meaning)));
+    const asked = [];
+    for (let i = 0; !$('#quiz-results') && i < 20; i++) {
+      const c = quizCard();
+      asked.push(c.id);
+      ok(inQuiz.has(c.id), 'q' + (i + 1) + ': from a chosen deck');
+      ok(optTexts().every((o) => meanings.has(o)), 'q' + (i + 1) + ': options from the chosen decks only (they have 4+ meanings)', JSON.stringify(optTexts()));
+      click('option-' + (i < 3 ? wrongIndex() : correctIndex()));
+      click('quiz-next');
+      await sleep(10);
+    }
+    eq(new Set(asked).size, 16, 'sixteen different words');
+    eq(text($('#quiz-score')), '13 / 16', 'score');
+    eq(text($('.score-sub')), '選擇題 · 16 題 · 2 個牌組', 'sub line: 2 個牌組');
+    const deckOfCard = (id) => S().decks.find((d) => d.id === S().cards.find((c) => c.id === id).deckId).name;
+    eq($$('.wrong-list .wl-row').map((r) => text(r.querySelector('.wr-deck'))), asked.slice(0, 3).map(deckOfCard),
+      'several decks: each wrong word says its deck');
+    eq(S().quizHistory, [{ mode: 'choice', deckIds: [L1, L2], score: 13, total: 16, at: T0 }], '最近測驗: kind, decks, score, time');
+
+    // 重測答錯的: the same three, not added to 最近測驗.
+    setClock(T0 + MIN);
+    click('retry-wrong');
+    await waitFor(() => quizCount() === '1 / 3', 'retry');
+    ok(inQuiz.has(quizCard().id), 'retry: the same words');
+    await answerAllChoice(() => true);
+    eq([text($('#quiz-score')), text($('.score-sub'))], ['3 / 3', '重測答錯的題目 · 2 個牌組'], 'retry results');
+    eq(S().quizHistory.length, 1, 'a retry is not added');
+    // 再測一次: the same decks, kind and count, a new set — added.
+    click('quiz-again');
+    await waitFor(() => quizCount() === '1 / 16', 'again');
+    ok(inQuiz.has(quizCard().id), 'again: from the chosen decks');
+    await answerAllChoice(() => true);
+    eq(S().quizHistory.map((e) => [e.score, e.total, e.at]), [[16, 16, T0 + MIN], [13, 16, T0]], '再測一次 is a new quiz: newest first');
+    click('quiz-home');
+    await onScreen('quiz-setup');
+    const day = (NOW.getMonth() + 1) + '/' + NOW.getDate();
+    eq($$('#quiz-recent .recent-row').map(text), ['選擇題 · 2 個牌組 · 16/16 · ' + day, '選擇題 · 2 個牌組 · 13/16 · ' + day], '最近測驗 on the quiz page');
+
+    // The distractor rule: fewer than 4 meanings in the chosen decks → options from every deck; 4+ → only theirs.
+    W().VCApp.importText('#deck: 二字甲\nduet | n. 二重奏\nsolo | n. 獨奏\n#deck: 二字乙\ntrio | n. 三重奏\nquartet | n. 四重奏', {});
+    s = S();
+    const [P, Q] = ['二字甲', '二字乙'].map((n) => deckNamed(s, n).id);
+    const pq = ['n. 二重奏', 'n. 獨奏', 'n. 三重奏', 'n. 四重奏'];
+    chooseDecks([P]);
+    await startFromSetup('choice');
+    ok(optTexts().length === 4 && optTexts().some((o) => pq.indexOf(o) < 0), 'one deck with 2 meanings: options borrowed from other decks', JSON.stringify(optTexts()));
+    click('quiz-quit');
+    await onScreen('quiz-setup');
+    chooseDecks([P, Q]);
+    await startFromSetup('choice');
+    for (let k = 0; k < 4; k++) {
+      eq(optTexts().slice().sort(), pq.slice().sort(), 'two decks, 4 meanings together: only theirs (q' + (k + 1) + ')');
+      click('option-' + correctIndex());
+      click('quiz-next');
+      await sleep(10);
+    }
+    eq(text($('.score-sub')), '選擇題 · 4 題 · 2 個牌組', 'four questions');
+    click('quiz-home');
+    await onScreen('quiz-setup');
+
+    // 拼字題 over several decks: only words that can be asked (never a phrase); 「繼續第 N 題」 after the back gesture.
+    W().VCApp.importText('#deck: 片語\ngive up | phr. 放棄 | Never give up. | 永不放棄。\ncarry on | phr. 繼續 | Please carry on. | 請繼續。', {});
+    const PH = deckNamed(S(), '片語').id;
+    chooseDecks([L1, PH]);
+    click('quiz-mode-spell');
+    eq([pickMeta(PH), quizSummary()], ['2 字 · 沒有可出的題目', '已選 2 個牌組 · 可出 8 題'], 'phrases not counted');
+    await startFromSetup('spell', 'all');
+    eq(quizCount(), '1 / 8', 'the eight words of 第一課');
+    for (let k = 0; k < 2; k++) {
+      ok(!VC().isPhrase(quizCard().word) && quizCard().deckId === L1, 'q' + (k + 1) + ': a word of 第一課');
+      click('spell-giveup');
+      click('quiz-next');
+      await sleep(10);
+    }
+    W().history.back();
+    await onScreen('quiz-setup');
+    eq(['.tile-title', '.tile-meta', '.tile-desc'].map((c) => text(act('quiz-resume') && act('quiz-resume').querySelector(c))),
+      ['繼續第 3 題', '共 8 題', '拼字題 · 2 個牌組'], '「繼續第 3 題」: size, kind, decks');
+    click('quiz-resume');
+    await onScreen('quiz');
+    eq(quizCount(), '3 / 8', 'goes on at 3');
+    noAppErrors();
+  });
+
+  test('最近測驗: newest first, five on the page, twenty kept; deck names', async function () {
+    await openApp({ clock: T0 });
+    const a = await importWords(5, '甲牌組');
+    const b = await importWords(5, '乙牌組');
+    const s = S();
+    s.quizHistory = Array.from({ length: 25 }, (_, i) => ({ mode: i % 2 ? 'spell' : 'choice', deckIds: i % 3 ? [a] : [a, b],
+      score: i % 6, total: 5, at: T0 - (i + 1) * DAY }));
+    s.quizHistory.push({ mode: 'choice', deckIds: [a], score: 9, total: 0, at: T0 }); // no questions: dropped
+    s.quizHistory.push({ mode: 'other', deckIds: [a], score: 1, total: 2, at: T0 }); // unknown kind: dropped
+    W().VCApp.setState(s);
+    const h = S().quizHistory;
+    eq([h.length, h[0].at, h[19].at], [20, T0 - DAY, T0 - 20 * DAY], 'twenty kept, newest first, unusable entries dropped');
+    click('tab-quiz');
+    await onScreen('quiz-setup');
+    const rows = $$('#quiz-recent .recent-row');
+    eq(rows.length, 5, 'five on the quiz page');
+    const d1 = new Date(T0 - DAY);
+    eq(text(rows[0]), '選擇題 · 2 個牌組 · 0/5 · ' + (d1.getMonth() + 1) + '/' + d1.getDate(), 'kind · decks · score · date');
+    eq(text(rows[1].querySelector('.recent-main')), '拼字題 · 甲牌組', 'one deck: its name');
+    ok($$('.quiz-setup .section-title').map(text).indexOf('最近測驗') >= 0, 'under 「最近測驗」');
+    // A deck deleted later: the entry stays, without a name.
+    const s2 = S();
+    s2.decks = s2.decks.filter((d) => d.id !== a);
+    s2.cards = s2.cards.filter((c) => c.deckId !== a);
+    W().VCApp.setState(s2);
+    eq(text($('#quiz-recent .recent-row:nth-child(2) .recent-main')), '拼字題 · 1 個牌組', 'its deck deleted: 1 個牌組');
+    noAppErrors();
+  });
+
+  test('two tabs: folders and 最近測驗 of both tabs are kept', async function () {
+    const sk = await openApp({ clock: T0 });
+    const A = await importWords(4, 'A');
+    W().VCApp.importText('xray | n. X 光\nyak | n. 犛牛\nzebra | n. 斑馬\nwolf | n. 狼', { deckName: 'B' });
+    const B = deckNamed(S(), 'B').id;
+    await sleep(400);
+
+    // Here: a new folder (its save still pending). There: another folder, B moved into it, a finished quiz.
+    let base = localStorage.getItem(sk);
+    click('new-folder');
+    await waitFor(modalOpen, 'name prompt');
+    await sleep(40);
+    setValue($('#modal-input'), '這邊的資料夾', 'folder name');
+    click('modal-ok');
+    await sleep(0);
+    ok(S().folders.length === 1 && localStorage.getItem(sk) === base, 'folder made here, its save pending');
+    const there = JSON.parse(base);
+    there.folders.push({ id: 'f-there', name: '那邊的資料夾', created: T0 - 5 });
+    there.decks.find((d) => d.id === B).folderId = 'f-there';
+    there.quizHistory.push({ mode: 'spell', deckIds: [B], score: 3, total: 4, at: T0 - 60000 });
+    storageEvent(sk, JSON.stringify(there));
+    await overlaysGone();
+    await sleep(400);
+    let saved = JSON.parse(localStorage.getItem(sk));
+    eq(saved.folders.map((f) => f.name).sort(), ['這邊的資料夾', '那邊的資料夾'].sort(), 'both folders');
+    eq(saved.decks.find((d) => d.id === B).folderId, 'f-there', 'the deck moved there stays moved');
+    eq(saved.quizHistory, there.quizHistory, 'the quiz finished there is kept');
+    eq($$('.folder-row').length, 2, 'home shows both folders');
+    const here = saved.folders.find((f) => f.name === '這邊的資料夾').id;
+
+    // Here: A moved into this tab's folder, a quiz finished (not saved yet). There: its folder renamed, another quiz.
+    await openMoveSheet(A);
+    click($('[data-action="move-to-folder"][data-folder-id="' + here + '"]'), 'move');
+    await overlaysGone();
+    seedRandom(3);
+    click('tab-quiz');
+    await onScreen('quiz-setup');
+    chooseDecks([A]);
+    await startFromSetup('choice');
+    await sleep(400);
+    base = localStorage.getItem(sk);
+    await answerAllChoice((i) => i > 0);
+    ok(localStorage.getItem(sk) === base && S().quizHistory.length === 2, 'finished here, not saved yet');
+    const there2 = JSON.parse(base);
+    there2.folders.find((f) => f.id === 'f-there').name = '那邊改名';
+    there2.quizHistory.unshift({ mode: 'choice', deckIds: [B], score: 4, total: 4, at: T0 + 1000 });
+    storageEvent(sk, JSON.stringify(there2));
+    await sleep(450);
+    saved = JSON.parse(localStorage.getItem(sk));
+    eq(saved.folders.find((f) => f.id === 'f-there').name, '那邊改名', 'the rename there is kept');
+    eq(saved.decks.find((d) => d.id === A).folderId, here, 'the move here is kept');
+    eq(saved.quizHistory.map((e) => [e.mode, e.score + '/' + e.total, e.at]),
+      [['choice', '4/4', T0 + 1000], ['choice', '3/4', T0], ['spell', '3/4', T0 - 60000]], 'both tabs’ quizzes, newest first');
+    ok($('#quiz-results'), 'the results stay on screen');
+
+    // Here: that folder deleted (pending); there: renamed again. It stays deleted; its deck is outside.
+    click('quiz-home');
+    await onScreen('quiz-setup');
+    click('tab-decks');
+    await onScreen('home');
+    click($('[data-action="folder-menu"][data-folder-id="f-there"]'), 'folder-menu');
+    await waitFor(() => act('folder-delete'), 'folder menu');
+    await sleep(60);
+    click('folder-delete');
+    await waitFor(modalOpen, 'confirm');
+    base = localStorage.getItem(sk);
+    await modalAnswer(true);
+    const there3 = JSON.parse(base);
+    there3.folders.find((f) => f.id === 'f-there').name = '又改名';
+    storageEvent(sk, JSON.stringify(there3));
+    await overlaysGone();
+    await sleep(400);
+    saved = JSON.parse(localStorage.getItem(sk));
+    eq([saved.folders.map((f) => f.id), saved.decks.find((d) => d.id === B).folderId], [[here], null], 'deleted here: stays deleted, its deck outside');
     noAppErrors();
   });
 
@@ -2193,14 +3305,28 @@
     ok(copied.indexOf('#deck:') >= 0 && copied.indexOf('word | /IPA/ | pos. 中文意思') >= 0, 'copied text has the rules');
     const rule8 = '8. 例句要自然、符合高中程度，而且一定要包含這個單字本身或它的規則變化（-s、-es、-ed、-ing、-er、-est、-ly）；' +
       '不要用不規則變化（例如 take 不要寫成 took、buy 不要寫成 bought），片語要完整出現（give up 可以寫 gives up、giving up，' +
-      '但不要拆成 give it up），因為 App 的拼字測驗會從例句裡把這個字挖空。翻譯用自然的台灣口語。';
-    ok(copied.indexOf('\n' + rule8 + '\n') >= 0, 'rule 8 asks for examples that contain the word (spec text)');
+      '但不要拆成 give it up），因為 App 的拼字測驗會從例句裡把這個字挖空。翻譯用自然的台灣口語。' +
+      '片語（兩個字以上）不會出拼字題，例句照常寫就好。';
+    ok(copied.indexOf('\n' + rule8 + '\n') >= 0, 'rule 8 asks for examples that contain the word, and says phrases are not spelled (spec text)');
+    const rule3 = '3. 每個牌組用一行「#deck: 牌組名稱」開始；一個牌組只寫一次 #deck:，不同牌組的名稱不要重複。' +
+      '如果我有說要放進哪個資料夾（例如課本名稱），就在第一個 #deck: 前面加一行「#folder: 資料夾名稱」。';
+    ok(copied.indexOf('\n' + rule3 + '\n') >= 0, 'rule 3 explains #folder: (spec text)');
     const md = (await (await fetch('../格式說明.md', { cache: 'no-store' })).text()).replace(/\r\n/g, '\n');
     ok(md.indexOf(copied) >= 0, '格式說明.md §11 contains exactly the copied text (keep app.js CLAUDE_PROMPT in sync)');
+    ok(/版本[：:\s]*v?3\.0|v3\.0/.test(md), '格式說明.md is for v3.0');
     const parsed = VC().parseDeckText(copied.slice(copied.lastIndexOf('#deck:')), {});
     eq([parsed.errors, parsed.decks.length && parsed.decks[0].cards.map((c) => c.word)], [[], ['abandon', 'reluctant', 'give up']],
        'the example in the prompt parses cleanly');
-    eq(parsed.decks[0].cards.filter((c) => !VC().makeCloze(c)).map((c) => c.word), [], 'and every example in it makes a spelling question');
+    eq(parsed.decks[0].cards.filter((c) => VC().isPhrase(c.word)).map((c) => c.word), ['give up'], 'give up is a phrase');
+    eq(parsed.decks[0].cards.filter((c) => !VC().isPhrase(c.word) && !VC().makeCloze(c)).map((c) => c.word), [],
+       'and every other example in it makes a spelling question');
+    // The 格式說明 #folder example imports as the doc says: one folder with three lesson decks.
+    const block = ((md.split('### 資料夾')[1] || '').split('```text\n')[1] || '').split('```')[0];
+    const res = W().VCApp.importText(block, {});
+    const s = S();
+    eq([res.added, res.errors, s.folders.map((f) => f.name)], [6, 0, ['龍騰英文 第三冊']], '格式說明 example: six words, one folder');
+    eq(s.decks.map((d) => [d.name, d.folderId === s.folders[0].id]), [['B3 L1', true], ['B3 L2', true], ['B3 L3', true]], '… with B3 L1–L3 in it');
+    eq(VC().quizEligible(s.cards).spell, 5, '… and every word but the phrase take part in makes a spelling question');
     noAppErrors();
   });
 
@@ -2348,8 +3474,8 @@
 
     seedRandom(4);
     await openDeck(deckId);
-    click('hub-choice');
-    await onScreen('quiz');
+    await quizFromHub('choice');
+    await sleep(400); // the quiz page's own save (the chosen deck) is done
     const id = quizCardId();
     const r0 = saved.cards.find((c) => c.id === id).right;
     click('option-' + correctIndex()); // the save of this answer is still pending (debounced)
@@ -2401,21 +3527,32 @@
 
   test('data saved by a newer app version is not overwritten (SRS-8)', async function () {
     const sk = 'e2e-' + RUN_ID + '-newer';
-    const raw = JSON.stringify({ version: 3, decks: [{ id: 'd1', name: '新版牌組', created: T0, settings: {} }], cards: [], future: { x: 1 } });
+    const raw = JSON.stringify({ version: 4, decks: [{ id: 'd1', name: '新版牌組', created: T0, settings: {} }], cards: [], future: { x: 1 } });
     localStorage.setItem(sk, raw);
     await openApp({ sk: sk, keep: true, clock: T0 });
     await waitFor(() => $('#home-notice'), 'notice');
-    eq($('#home-notice').getAttribute('data-notice'), 'newer', 'version 3: please-update notice');
+    eq($('#home-notice').getAttribute('data-notice'), 'newer', 'version 4: please-update notice');
     ok(act('reload-app'), 'reload button');
     eq(text($('.deck-row .deck-name')), '新版牌組', 'data still shown');
     W().VCApp.save();
     W().dispatchEvent(new (W().Event)('pagehide'));
     eq(localStorage.getItem(sk), raw, 'stored data untouched');
-    // A version-3 backup is refused too.
+    // Making a folder or choosing decks on the quiz page does not write over it either.
+    click('new-folder');
+    await waitFor(modalOpen, 'name prompt');
+    setValue($('#modal-input'), '新資料夾', 'folder name');
+    click('modal-ok');
+    await overlaysGone();
+    click('tab-quiz');
+    await onScreen('quiz-setup');
+    click('quiz-none');
+    W().VCApp.save();
+    eq(localStorage.getItem(sk), raw, 'still untouched');
+    // A version-4 backup is refused too.
     W().location.hash = '#/import';
     await onScreen('import');
-    setFiles($('#file-input'), [makeFile([JSON.stringify({ app: 'vocabcards', version: 3, data: JSON.parse(raw) })], 'new.json', 'application/json')]);
-    await waitFor(() => toasts().some((t) => /較新版本/.test(t)), 'refused');
+    setFiles($('#file-input'), [makeFile([JSON.stringify({ app: 'vocabcards', version: 4, data: JSON.parse(raw) })], 'new.json', 'application/json')]);
+    await waitFor(() => toasts().some((t) => /這個備份是用較新版本/.test(t)), 'refused');
     ok(!modalOpen(), 'no restore dialog');
     noAppErrors();
   });
@@ -2620,8 +3757,8 @@
     // M3: two answers here (not saved yet) while the other tab answers the same word and switches theme.
     seedRandom(8);
     await openDeck(d1);
-    click('hub-choice');
-    await onScreen('quiz');
+    await quizFromHub('choice');
+    await sleep(400); // the quiz page's own save (the chosen deck) is done
     base = localStorage.getItem(sk);
     const w1 = quizCard().word;
     click('option-' + correctIndex());
@@ -2673,8 +3810,7 @@
     const sk = await openApp({ clock: T0 });
     const deckId = await importWords(5, '五個字');
     await openDeck(deckId);
-    click('hub-spell');
-    await onScreen('quiz');
+    await quizFromHub('spell');
     const input = $('#spell-input');
     setValue(input, 'app', 'typing');
     const other = JSON.parse(localStorage.getItem(sk));
@@ -2729,8 +3865,8 @@
     try {
       ok(localStorage.getItem(sk).length > 500000, 'big collection: saves are batched (2 s)');
       await openDeck(deckNamed(S(), '很多字').id);
-      click('hub-choice');
-      await onScreen('quiz');
+      await quizFromHub('choice');
+      await sleep(2300); // the quiz page's own save (the chosen deck) is done
       const id = quizCardId();
       click('option-' + correctIndex());
       W().location.hash = '#/import';
@@ -2740,7 +3876,7 @@
         cards: Array.from({ length: 2500 }, (_, i) => ({ id: 'c' + i, deckId: 'b1', word: 'big' + i, meaning: pad + i, state: 'new' })) } };
       setFiles($('#file-input'), [makeFile([JSON.stringify(backup)], 'backup.json', 'application/json')]);
       await waitFor(modalOpen, 'restore dialog');
-      const release = fillStorage(20000);
+        const release = fillStorage(20000);
       try {
         await modalAnswer(true);
         ok(toasts().some((t) => /沒有還原/.test(t)), 'restore refused', JSON.stringify(toasts()));
@@ -2776,8 +3912,7 @@
     const deckId = deckNamed(S(), 'L9 樣本').id;
     seedRandom(169);
     await openDeck(deckId);
-    click('hub-choice');
-    await onScreen('quiz');
+    await quizFromHub('choice');
     eq(quizCount(), '1 / 6', 'every word');
     let firstWrong = null;
     for (let i = 0; i < 6; i++) {
@@ -2798,6 +3933,8 @@
     eq(text($('#quiz-score')), '5 / 6', 'score');
     eq(text($('.wl-row .wr-meaning')), flat(firstWrong.meaning), 'the results list shows the whole meaning, notes and all');
     click('quiz-home');
+    await onScreen('quiz-setup');
+    W().history.back();
     await onScreen('deck');
 
     const s = S();
@@ -2817,8 +3954,7 @@
     const deckId = await importWords(25, '連點');
     seedRandom(5);
     await openDeck(deckId);
-    click('hub-choice');
-    await onScreen('quiz');
+    await quizFromHub('choice');
     await sleep(400);
     click('option-' + correctIndex());
     await sleep(950);
@@ -2859,8 +3995,7 @@
     const deckId = await importWords(12, '雙擊');
     seedRandom(5);
     await openDeck(deckId);
-    click('hub-spell');
-    await onScreen('quiz');
+    await quizFromHub('spell');
     const input = $('#spell-input');
     setValue(input, 'wrongword');
     tap(act('spell-submit'), 'spell-submit');
@@ -2883,7 +4018,7 @@
     noAppErrors();
   });
 
-  test('拼字題: 不會 and the meaning in the card, other forms, repeated words, be-phrases (PH-7, F7, F6, RL-4)', async function () {
+  test('拼字題: 不會 and the meaning in the card, other forms, repeated words, no be-phrases (PH-7, F7, F6, RL-4)', async function () {
     await openApp({ clock: T0 });
     W().VCApp.importText([
       'perceive | v. 察覺 | She perceived a change in his mood. | 她察覺到他情緒的變化。',
@@ -2893,14 +4028,14 @@
     ].join('\n'), { deckName: '形態' });
     seedRandom(4);
     await openDeck(deckNamed(S(), '形態').id);
-    click('hub-spell');
-    await onScreen('quiz');
+    await quizFromHub('spell');
+    eq(quizCount(), '1 / 3', 'be accustomed to is a phrase: not asked');
     const input = $('#spell-input');
     const giveup = act('spell-giveup');
     ok(giveup.closest('.quiz-card .quiz-card-foot'), '不會，看答案 is in the sentence card');
     ok(giveup.getBoundingClientRect().bottom <= input.getBoundingClientRect().top, '… above the input (the phone keyboard covers what is below it)');
     const seen = [];
-    for (let i = 0; i < 4; i++) {
+    for (let i = 0; i < 3; i++) {
       const c = quizCard();
       seen.push(c.word);
       if (c.word === 'perceive') {
@@ -2916,11 +4051,6 @@
         click('spell-giveup');
         ok(!$('.fb-form'), '不會: no form line');
         eq(text($('.cloze')), 'Practice makes perfect, so practice every day.', 'answered: the whole sentence');
-      } else if (c.word === 'be accustomed to') {
-        eq(text($('.cloze')), 'Most students are a________d t_ studying late at night.', 'be is not asked');
-        setValue(input, 'be accustomed to');
-        click('spell-submit');
-        ok($('.quiz-feedback.ok'), 'typing the phrase as learned (with be) is right');
       } else {
         eq(text($('.quiz-hint')), 'v. 跪下', 'hint without the English note');
         setValue(input, 'kneel');
@@ -2931,8 +4061,8 @@
       click('quiz-next');
       await sleep(10);
     }
-    eq(seen.slice().sort(), ['be accustomed to', 'kneel', 'perceive', 'practice'], 'every word');
-    eq(text($('#quiz-score')), '2 / 4', 'score');
+    eq(seen.slice().sort(), ['kneel', 'perceive', 'practice'], 'every single word');
+    eq(text($('#quiz-score')), '1 / 3', 'score');
     noAppErrors();
   });
 
@@ -2945,8 +4075,14 @@
     s.cards.find((c) => c.word === 'temple').right = 2;
     W().VCApp.setState(s);
     await openDeck(deckId);
-    ok(act('hub-spell').disabled, '拼字題 disabled');
     eq(text(act('add-examples')), '請 Claude 幫這個牌組補例句', 'a way to get example sentences');
+    await hubQuizPage();
+    click('quiz-mode-spell');
+    eq([pickMeta(deckId), quizSummary()], ['5 字 · 沒有可出的題目', '已選 1 個牌組 · 單字都沒有例句，無法出題'], '拼字題: nothing to ask, and why');
+    ok(act('quiz-start').disabled, '開始測驗 disabled');
+    ok($('.quiz-setup [data-action="add-examples"]'), 'the quiz page offers 請 Claude 補例句 too');
+    W().history.back();
+    await onScreen('deck');
 
     click('hub-cards');
     await onScreen('cards');
@@ -2980,7 +4116,12 @@
     eq(text($('#import-summary')), '可匯入 5 張', 'all five words are updated');
     click('import-confirm');
     await onScreen('deck');
-    ok(!act('hub-spell').disabled && !act('add-examples'), '拼字題 works now; no more 補例句 link');
+    ok(!act('add-examples'), 'no more 補例句 link');
+    await hubQuizPage();
+    eq(quizSummary(), '已選 1 個牌組 · 可出 5 題', '拼字題 works now');
+    ok(!$('.quiz-setup [data-action="add-examples"]'), 'no 補例句 link on the quiz page either');
+    W().history.back();
+    await onScreen('deck');
     const after = S();
     eq(cardsOf(after, deckId).filter((c) => c.example).length, 5, 'every word has an example');
     eq(cardWord(after, 'temple').right, 2, 'quiz records kept');
@@ -2991,16 +4132,63 @@
     noAppErrors();
   });
 
+  test('請 Claude 補例句 for a deck whose name is also used in another folder: the reply goes into that deck', async function () {
+    await openApp({ clock: T0 });
+    W().VCApp.importText('#folder: 第三冊\n#deck: L1\nmania | n. 狂熱\ngoddess | n. 女神\n#folder: 第四冊\n#deck: L1\ntemple | n. 廟宇\nstatue | n. 雕像', {});
+    const s = S();
+    const f4 = s.folders.find((f) => f.name === '第四冊').id;
+    const [l1a, l1b] = s.decks.map((d) => d.id);
+    eq(s.decks.map((d) => d.folderId === f4), [false, true], 'two L1 decks, one per folder');
+    let copied = null;
+    Object.defineProperty(W().navigator, 'clipboard', { configurable: true,
+      value: { writeText: (t) => { copied = t; return Promise.resolve(); } } });
+    for (const withFolder of [true, false]) {
+      await hubVia(l1b);
+      await openSheetBy('add-examples');
+      click('copy-examples-prompt');
+      await waitFor(() => copied !== null, 'clipboard write');
+      ok(copied.indexOf('#folder: 第四冊\n#deck: L1\n') >= 0, 'the prompt has the deck’s #folder: and #deck: lines');
+      copied = null;
+      click('paste-examples');
+      await onScreen('import');
+      const n = withFolder ? 1 : 2;
+      setValue($('#import-text'), '```text\n' + (withFolder ? '#folder: 第四冊\n' : '') + '#deck: L1\n' +
+        'temple | n. 廟宇 | The temple is old' + n + '. | 這座廟很古老。\nstatue | n. 雕像 | A statue stands here' + n + '. | 這裡有一座雕像。\n```', 'reply');
+      eq($$('.sections li').map((li) => [text(li.querySelector('.sec-name')), text(li.querySelector('.sec-tag'))]), [['L1', '加入現有']],
+        (withFolder ? 'with' : 'without') + ' #folder:: into the existing deck');
+      click('import-confirm');
+      await onScreen('deck');
+      eq([cardsOf(S(), l1b).map((c) => c.example), cardsOf(S(), l1a).every((c) => !c.example), S().decks.length],
+        [['The temple is old' + n + '.', 'A statue stands here' + n + '.'], true, 2],
+        (withFolder ? 'with' : 'without') + ' #folder:: the L1 of 第四冊 got the examples; nothing else changed');
+      // Without examples again, for the next round.
+      const s2 = S();
+      s2.cards.forEach((c) => { if (c.deckId === l1b) { c.example = ''; c.exampleZh = ''; } });
+      W().VCApp.setState(s2);
+    }
+    noAppErrors();
+  });
+
   test('browse and editor: 不考拼字, and what the spelling quiz asks while typing (RL-7)', async function () {
     await openApp({ clock: T0 });
-    W().VCApp.importText('take | v. 拿 | He took the last one. | 他拿走最後一個。\napple | n. 蘋果 | I ate an apple. | 我吃了一顆蘋果。\nbanana | n. 香蕉',
-      { deckName: '提示' });
+    W().VCApp.importText('take | v. 拿 | He took the last one. | 他拿走最後一個。\napple | n. 蘋果 | I ate an apple. | 我吃了一顆蘋果。\nbanana | n. 香蕉\n' +
+      'give up | phr. 放棄 | Never give up. | 永不放棄。\nwell-being | n. 幸福 | Sleep helps your well-being. | 睡眠有益身心。', { deckName: '提示' });
     const deckId = deckNamed(S(), '提示').id;
     W().location.hash = '#/deck/' + encodeURIComponent(deckId) + '/words';
     await onScreen('browse');
     const pills = {};
     $$('.word-row').forEach((r) => { pills[text(r.querySelector('.wr-word'))] = text(r.querySelector('.p-nospell')); });
-    eq(pills, { take: '不考拼字', apple: null, banana: null }, 'only an example without its word is marked');
+    eq(pills, { take: '不考拼字', apple: null, banana: null, 'give up': '片語不考拼字', 'well-being': null },
+      'an example without its word is marked 不考拼字, a phrase 片語不考拼字 (well-being is one word)');
+    click($('[data-action="card-row"][data-card-id="' + cardWord(S(), 'give up').id + '"]'));
+    await waitFor(() => sheetOpen() && $('#f-example-hint'), 'editor');
+    ok(/^片語不考拼字/.test(text($('#f-example-hint'))) && !$('#f-example-hint').classList.contains('warn'),
+      'a phrase: the hint says it is not asked (no warning)', text($('#f-example-hint')));
+    setValue($('#f-word'), 'give', 'word');
+    setValue($('#f-example'), 'Never give in.', 'example');
+    eq(text($('#f-example-hint')), '拼字題：Never g__e in.', 'one word again: the question it makes');
+    click('sheet-close');
+    await overlaysGone();
     click($('[data-action="card-row"][data-card-id="' + cardWord(S(), 'apple').id + '"]'));
     await waitFor(() => sheetOpen() && $('#f-example-hint'), 'editor');
     eq(text($('#f-example-hint')), '拼字題：I ate an a___e.', 'the question it makes');
@@ -3074,13 +4262,12 @@
     noAppErrors();
   });
 
-  test('quiz: the back gesture keeps an unfinished quiz, its tile continues it (PH-8)', async function () {
+  test('quiz: the back gesture keeps an unfinished quiz, 「繼續第 N 題」 continues it (PH-8)', async function () {
     await openApp({ clock: T0 });
     const deckId = await importWords(8, '繼續');
     seedRandom(2);
     await openDeck(deckId);
-    click('hub-choice');
-    await onScreen('quiz');
+    await quizFromHub('choice');
     click('option-' + correctIndex());
     click('quiz-next');
     await sleep(10);
@@ -3089,19 +4276,35 @@
     await sleep(10);
     eq(quizCount(), '3 / 8', 'question 3');
     W().history.back();
-    await onScreen('deck');
-    eq(text($('[data-action="hub-choice"] .tile-meta')), '繼續第 3 題', 'the tile says the quiz can go on');
-    click('hub-choice');
+    await onScreen('quiz-setup');
+    const resume = act('quiz-resume');
+    eq(['.tile-title', '.tile-meta', '.tile-desc'].map((c) => text(resume && resume.querySelector(c))),
+      ['繼續第 3 題', '共 8 題', '選擇題 · 繼續'], 'the quiz page says the quiz can go on: where, how many, which kind and deck');
+    // Leaving the quiz page and coming back keeps it.
+    click('tab-decks');
+    await onScreen('home');
+    click('tab-quiz');
+    await onScreen('quiz-setup');
+    ok(act('quiz-resume'), 'still there after a tab switch');
+    click('quiz-resume');
     await onScreen('quiz');
     eq(quizCount(), '3 / 8', 'it goes on at question 3');
     eq([totalOf(S(), 'right'), totalOf(S(), 'wrong')], [1, 1], 'nothing counted twice');
     click('quiz-quit');
     eq(await modalAnswer(true), '要結束測驗嗎？', '✕ → 結束');
-    await onScreen('deck');
-    ok(!$('[data-action="hub-choice"] .tile-meta'), 'ended: nothing to continue');
-    click('hub-choice');
+    await onScreen('quiz-setup');
+    ok(!act('quiz-resume'), 'ended: nothing to continue');
+    click('quiz-start');
     await onScreen('quiz');
     eq(quizCount(), '1 / 8', 'a fresh quiz');
+    // 開始測驗 while a quiz is left half-way starts a new one.
+    click('option-' + correctIndex());
+    W().history.back();
+    await onScreen('quiz-setup');
+    ok(act('quiz-resume'), 'half-way again');
+    click('quiz-start');
+    await onScreen('quiz');
+    eq(quizCount(), '1 / 8', '開始測驗: a fresh quiz, not the old one');
     noAppErrors();
   });
 
@@ -3129,8 +4332,18 @@
     const deckId = await importWords(25, '焦點');
     seedRandom(3);
     await openDeck(deckId);
-    ok($$('.quiz-seg button').every((b) => b.offsetHeight >= 44), '每次測驗題數 buttons are at least 44px tall',
-       JSON.stringify($$('.quiz-seg button').map((b) => b.offsetHeight)));
+    await hubQuizPage();
+    ok($$('.count-seg button').length === 3 && $$('.count-seg button').every((b) => b.offsetHeight >= 44), '題數 buttons are at least 44px tall',
+       JSON.stringify($$('.count-seg button').map((b) => b.offsetHeight)));
+    ok($$('.pick-row, .mode-opt').every((b) => b.offsetHeight >= 56), 'deck rows and 題型 choices are big tap targets',
+       JSON.stringify($$('.pick-row, .mode-opt').map((b) => b.offsetHeight)));
+    // A tap on a deck row keeps the focus on that row (keyboard / screen reader users stay put).
+    pickRow(deckId).focus();
+    click(pickRow(deckId), 'quiz-deck');
+    ok(D().activeElement === pickRow(deckId) && pickRow(deckId).getAttribute('aria-checked') === 'false', 'the row keeps the focus');
+    click(pickRow(deckId), 'quiz-deck');
+    W().history.back();
+    await onScreen('deck');
     click('hub-cards');
     await onScreen('cards');
     act('next').focus();
@@ -3141,8 +4354,7 @@
     eq([D().activeElement.getAttribute('data-action'), act('flip').getAttribute('aria-pressed')], ['flip', 'true'], '翻面 keeps the focus, pressed');
     click('back');
     await onScreen('deck');
-    click('hub-choice');
-    await onScreen('quiz');
+    await quizFromHub('choice');
     await sleep(400);
     const ci = correctIndex();
     const wi = wrongIndex();
@@ -3158,13 +4370,13 @@
 
   test('release: versions match; the service worker caches every app file', async function () {
     await openApp({ clock: T0 });
-    eq(VC().version, '2.1', 'core.js VC.version');
+    eq(VC().version, '3.0', 'core.js VC.version');
     click('open-settings');
     await onScreen('settings');
     ok(new RegExp('版本\\s*' + VC().version.replace('.', '\\.')).test(text($('main'))), 'settings shows APP_VERSION = VC.version');
     const get = async (f) => (await fetch('../' + f, { cache: 'no-store' })).text();
     const sw = await get('sw.js');
-    ok(/const CACHE = 'vocabcards-v5';/.test(sw), 'service worker cache vocabcards-v5');
+    ok(/const CACHE = 'vocabcards-v6';/.test(sw), 'service worker cache vocabcards-v6');
     // A release changes sw.js, so the browser installs a new worker that downloads every file (PH-4).
     eq((/const VERSION = '([^']*)';/.exec(sw) || [])[1], VC().version, 'sw.js VERSION = VC.version');
     const cfg = await get('_config.yml');
@@ -3194,6 +4406,7 @@
     });
     if (failures.length) lines.push('');
     summary.forEach((l) => lines.push(l));
+    lines.push('', 'page time ' + Math.round(performance.now() / 1000) + ' s');
     out.textContent = lines.join('\n');
     out.className = fail ? 'fail' : 'pass';
     document.title = lines[0];
@@ -3215,17 +4428,19 @@
       return;
     }
     const only = new URLSearchParams(location.search).get('only');
-    const selected = only ? tests.filter((t) => t.name.indexOf(only) >= 0) : tests;
+    const selected = only ? tests.filter((t) => only.split('|').some((o) => t.name.indexOf(o) >= 0)) : tests;
     for (const t of selected) {
       current = t.name;
       const before = fail;
       const checks = pass + fail;
+      const started = performance.now();
       try {
         await withTimeout(t.fn(), TEST_TIMEOUT);
       } catch (e) {
         record(false, 'threw', String((e && e.stack) || e));
       }
-      summary.push((fail > before ? 'not ok ' : 'ok     ') + t.name + '  (' + (pass + fail - checks) + ' checks)');
+      summary.push((fail > before ? 'not ok ' : 'ok     ') + t.name + '  (' + (pass + fail - checks) + ' checks, ' +
+        (Math.round((performance.now() - started) / 100) / 10) + ' s)');
       out.textContent = 'RUNNING ' + summary.length + '/' + selected.length;
     }
     if (frame) { frame.remove(); frame = null; } // its pagehide save lands first …

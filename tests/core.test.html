@@ -78,10 +78,10 @@
   test('contract: VC exists with every function', () => {
     ok(typeof VC === 'object', 'window.VC defined');
     ['parseDeckText', 'serializeDeck', 'decodeBytes', 'normalizeWord', 'newCard', 'wordForms', 'foldAccents', 'headwordRegex',
-     'findHeadwords', 'findHeadword', 'speakableWord', 'maskWord', 'makeCloze', 'checkSpelling', 'isOtherForm', 'quizMeaning',
+     'findHeadwords', 'findHeadword', 'speakableWord', 'isPhrase', 'maskWord', 'makeCloze', 'checkSpelling', 'isOtherForm', 'quizMeaning',
      'posOf', 'meaningKey', 'shuffle', 'seededRng', 'seededOrder', 'pickChoices', 'buildQuiz', 'quizEligible']
       .forEach(fn => ok(typeof VC[fn] === 'function', 'VC.' + fn));
-    eq(VC.version, '2.1', 'VC.version');
+    eq(VC.version, '3.0', 'VC.version');
     eq(VC.DEFAULT_DECK_SETTINGS, { direction: 'en2zh' }, 'DEFAULT_DECK_SETTINGS');
     ['SRS', 'answer', 'previewLabels', 'formatInterval', 'formatDays', 'dueLabel', 'deckCounts', 'nextCard',
      'dayKey', 'dayStart', 'addDays']
@@ -165,6 +165,64 @@
     eq(parse('#deck: X\nx | 叉\n#deck:\ny | 歪').decks.map(d => [d.name, words(d)]),
        [['X', ['x']], ['Default', ['y']]], 'empty #deck: falls back to default');
     eq(parse('#deck: Only comments\n# nothing here\n'), { decks: [], errors: [] }, 'zero-card section omitted');
+    eq(r.decks.map(d => d.folder), ['', '', '', ''], 'no #folder: → folder \'\' (v3)');
+  });
+
+  test('parse: #folder sections (v3)', () => {
+    const r = parse([
+      'zero | 零',               // 1  before any #folder: → no folder
+      '#folder: 龍騰 B1',        // 2
+      '#deck: L1',               // 3
+      'one | 一',                // 4
+      '#deck: L2',               // 5
+      'two | 二',                // 6
+      '# folder： 三民 B2',      // 7  space after #, full-width colon
+      '#deck: L1',               // 8  the same name in another folder → another deck
+      'three | 三',              // 9
+      '＃FOLDER：',              // 10 empty → no folder again (full-width ＃, any case)
+      '#deck: Misc',             // 11
+      'four | 四',               // 12
+      '#Folder : 龍騰 B1',       // 13 back to the first folder
+      '#deck: L1',               // 14 → the same deck as line 3
+      'five | 五',               // 15
+    ].join('\n'));
+    eq(r.errors, [], '#folder: lines are never errors');
+    eq(r.decks.map(d => [d.folder, d.name, words(d)]), [
+      ['', 'Default', ['zero']],
+      ['龍騰 B1', 'L1', ['one', 'five']],
+      ['龍騰 B1', 'L2', ['two']],
+      ['三民 B2', 'L1', ['three']],
+      ['', 'Misc', ['four']],
+    ], 'folder per deck section, never a card');
+    eq(r.decks[1].cards.map(c => c.line), [4, 15], 'line numbers');
+    eq(Object.keys(r.decks[0]).sort(), ['cards', 'folder', 'name'], 'deck keys');
+
+    const sections = text => parse(text).decks.map(d => [d.folder, d.name, words(d)]);
+    eq(sections('#folder: 龍騰\nabandon | 放棄\nability | 能力'), [['龍騰', 'Default', ['abandon', 'ability']]],
+       'a file without #deck: — the default deck goes in the folder');
+    eq(sections('#deck: A\n#folder: X\na | 甲'), [['X', 'A', ['a']]], '#folder: right after #deck: (before its cards) counts for it');
+    eq(sections('#deck: A\na | 甲\n#folder: X\nb | 乙\n#deck: B\nc | 丙'), [['', 'A', ['a', 'b']], ['X', 'B', ['c']]],
+       'after a card: from the next #deck: on');
+    eq(sections('#folder: X\n#deck: A\na | 甲\n#deck: B\nb | 乙\n#deck: A\nc | 丙'), [['X', 'A', ['a', 'c']], ['X', 'B', ['b']]],
+       'the same name in the same folder → one deck');
+    eq(sections('#folder:   多 個   空白  \nx | 叉'), [['多 個 空白', 'Default', ['x']]], 'name trimmed/collapsed');
+    eq(sections('#folder：高中\nx | 叉'), [['高中', 'Default', ['x']]], 'full-width colon right after folder');
+    eq(sections('#folder: X\n#folder:\n#deck: A\na | 甲'), [['', 'A', ['a']]], 'an empty #folder: resets');
+    eq(sections('#folder: X\n#folder: Y\n#deck: A\na | 甲'), [['Y', 'A', ['a']]], 'the last #folder: wins');
+    eq(parse('#folder: Empty\n#deck: Nothing\n# only comments'), { decks: [], errors: [] }, 'zero-card folder → nothing');
+    eq(sections('#folder X\n#folders: Y\n#folder column:3\nx | 叉'), [['', 'Default', ['x']]], 'look-alikes are comments');
+    eq(sections('#folder: a | 甲\nb | 乙'), [['a | 甲', 'Default', ['b']]], 'a #folder: line with | is still the folder name');
+    eq(sections('#folder: X\n#deck: A\nword | meaning\na | 甲'), [['X', 'A', ['a']]], 'header row after #folder: + #deck: skipped');
+    eq(sections('#folder: X\n單字 | 中文意思\na | 甲'), [['X', 'Default', ['a']]], 'header row right after #folder: skipped');
+    eq(sections('#folder: X\n#deck column:2\n#separator:tab\nabandon\tEnglish::Unit3\t放棄'), [['X', 'Unit3', ['abandon']]],
+       'Anki deck column inside a folder');
+    const csv = VC.parseDeckText('#folder: X\n#deck: A\nabandon,"v. 放棄, 拋棄"', { csv: true });
+    eq(csv.decks.map(d => [d.folder, d.name, d.cards.map(fields)]), [['X', 'A', [F('abandon', '', 'v. 放棄, 拋棄')]]], 'CSV file');
+    const fenced = parse('好的，這是你的單字檔：\n```text\n#folder: 龍騰 B1\n#deck: L1\nabandon | 放棄\n```\n祝你學習順利！');
+    eq([fenced.decks.map(d => [d.folder, d.name, words(d)]), fenced.errors, fenced.skipped],
+       [[['龍騰 B1', 'L1', ['abandon']]], [], [1, 7]], 'inside a ``` block copied from an AI chat');
+    const many = parse('#folder: B1\n#deck: L1\na | 甲\n#deck: L2\nb | 乙\n#folder: B2\n#deck: L1\nc | 丙\n#deck: L2\nd | 丁');
+    eq(many.decks.map(d => d.folder + '/' + d.name), ['B1/L1', 'B1/L2', 'B2/L1', 'B2/L2'], 'two textbooks with the same lesson names');
   });
 
   test('parse: comments', () => {
@@ -534,6 +592,37 @@
     eq(one('power | n. 次方 | 2**3 is 8 and 3**2 is 9. | 2**3 是 8。').example, '2**3 is 8 and 3**2 is 9.', '2**3 is not bold');
   });
 
+  test('serializeDeck: optional folder (v3)', () => {
+    const cards = [F('abandon', '/əˈbændən/', 'v. 放棄', 'He abandoned his car.', '他棄車而去。'), F('ability', '', 'n. 能力')];
+    eq(VC.serializeDeck('Lesson 1', cards, '龍騰 B1'), [
+      '#folder: 龍騰 B1',
+      '#deck: Lesson 1',
+      'abandon | /əˈbændən/ | v. 放棄 | He abandoned his car. | 他棄車而去。',
+      'ability | n. 能力',
+      '',
+    ].join('\n'), 'text with #folder: before #deck:');
+    const plain = VC.serializeDeck('Lesson 1', cards);
+    ['', null, undefined, '   ', '\n'].forEach(f =>
+      eq(VC.serializeDeck('Lesson 1', cards, f), plain, 'no #folder: line for ' + JSON.stringify(f)));
+    ok(plain.indexOf('#folder') === -1, 'two arguments: unchanged v2 output');
+    eq(VC.serializeDeck('E', [], ' 多 個\n空白 '), '#folder: 多 個 空白\n#deck: E\n', 'folder name on one line, empty deck');
+
+    const back = parse(VC.serializeDeck('Lesson 1', cards, '龍騰 B1'));
+    eq([back.errors, back.decks.map(d => [d.folder, d.name, d.cards.map(fields)])],
+       [[], [['龍騰 B1', 'Lesson 1', cards]]], 'round-trip keeps the folder');
+    const header = parse(VC.serializeDeck('H', [F('term', '', 'n. 學期'), F('word', '', 'n. 字')], 'F'));
+    eq([header.errors, header.decks.map(d => [d.folder, d.name, words(d)])], [[], [['F', 'H', ['term', 'word']]]],
+       'a header-like first word round-trips inside a folder');
+    // Several decks exported one after another read back as they were.
+    const joined = [
+      VC.serializeDeck('L1', [F('a1', '', '甲')], 'B1'),
+      VC.serializeDeck('L2', [F('b2', '', '乙')], 'B2'),
+      VC.serializeDeck('L1', [F('c3', '', '丙')], 'B2'),
+    ].join('');
+    eq(parse(joined).decks.map(d => [d.folder, d.name, words(d)]),
+       [['B1', 'L1', ['a1']], ['B2', 'L2', ['b2']], ['B2', 'L1', ['c3']]], 'decks of several folders in one file');
+  });
+
   /* ============================================================ decodeBytes */
 
   test('decodeBytes', () => {
@@ -800,6 +889,99 @@
 
   /* ========================================================= spelling quiz */
 
+  test('isPhrase (v3)', () => {
+    const yes = (w, label) => eq(VC.isPhrase(w), true, label || JSON.stringify(w));
+    const no = (w, label) => eq(VC.isPhrase(w), false, label || JSON.stringify(w));
+    // Two or more words.
+    yes('give up');
+    yes('Give Up', 'any case');
+    yes('look forward to');
+    yes('ice cream', 'a compound noun with a space');
+    yes('3D printing', 'digits');
+    yes('give  up', 'two spaces');
+    yes('give　up', 'full-width space');
+    yes('give\tup', 'TAB');
+    yes('give up', 'no-break space');
+    yes('  give up  ', 'spaces around');
+    yes('be born', 'be counts as a word');
+    yes('be aware of');
+    yes('make up one\'s mind', "one's");
+    yes('enjoy oneself', 'oneself is a word, not a stand-in');
+    yes('or something', 'something after a short word is a word');
+    yes('someone else', 'someone at the start is a word');
+    yes('Plan B', 'a lone B is a word');
+    yes('vitamin C');
+    yes("rock 'n' roll");
+    yes('café au lait', 'accents');
+    // Stand-ins (sb / sth / A … B / … / V-ing) do not count, the words around them do.
+    yes('remind sb of sth', 'sb … sth');
+    yes('remind sb/sth of sth', 'sb/sth');
+    yes('keep sb／sth from V-ing', 'sb／sth, full-width slash');
+    yes("sb's cup of tea", "sb's at the start");
+    yes('pick sb up', 'sb in the middle');
+    yes('accuse somebody of something', 'somebody / something');
+    yes('not only A but also B', 'A … B');
+    yes('not … until …', 'ellipsis');
+    yes('so...that', 'dots');
+    yes('want to V', 'V after to');
+    yes('be worth V-ing', 'V-ing');
+    // Patterns, brackets and alternatives.
+    yes('look forward to + V-ing', 'a pattern after +');
+    yes('give up (on)', 'brackets');
+    yes('cast (wooden) blocks', 'an optional word');
+    yes('look (sth) up', '(sth)');
+    yes('give up / quit', 'the first alternative is a phrase');
+    yes('take part in = participate in', '= alternatives');
+    yes('abandon oneself to');
+    // One word.
+    no('abandon');
+    no('well-being', 'hyphen');
+    no('mother-in-law', 'hyphens');
+    no('T-shirt');
+    no('e-mail');
+    no("o'clock", 'apostrophe');
+    no('o’clock', 'curly apostrophe');
+    no("can't");
+    no('U.S.', 'dots inside a word');
+    no('a.m.');
+    no('Ph.D.');
+    no('résumé', 'accents');
+    no('R&B');
+    no('3D');
+    no('x-y');
+    no('a');
+    no('re-', 'a prefix');
+    no('-ment', 'a suffix');
+    no('abandon (v.)', 'part of speech in brackets');
+    no('abandon v.', 'part of speech');
+    no('abandon n./v.', 'two parts of speech');
+    no('abandon [vt.]', '[vt.]');
+    no('abandon（放棄）', 'Chinese in brackets');
+    no('abandon 放棄', 'Chinese');
+    no('abandon /əˈbændən/', 'a phonetic after a slash');
+    no('abandon [U]', 'a usage label');
+    no('abandon sth', 'a stand-in after the word');
+    no('abandon sb/sth', 'sb/sth after the word');
+    no("abandon sb's", "sb's");
+    no('tell someone', 'someone after a word is a stand-in');
+    no('something', 'a stand-in word alone');
+    no('someone');
+    no('quit / give up', 'the first alternative is one word');
+    no('color / colour');
+    no('color/colour');
+    no('color，colour', 'full-width comma');
+    no('(the) Internet', 'an optional word in front');
+    no('abandon...', 'trailing dots');
+    no('abandon …');
+    no('look + adj.', 'a pattern after +');
+    no('  abandon  ', 'spaces around');
+    no('', 'empty');
+    no('   ', 'spaces only');
+    no(null, 'null');
+    no(undefined, 'undefined');
+    no(42, 'a number');
+  });
+
   test('maskWord', () => {
     const mw = VC.maskWord;
     eq(mw('abandoned'), { masked: 'a_______d', hidden: 7 }, 'abandoned');
@@ -826,14 +1008,14 @@
     eq(VC.makeCloze(card('abandon', 'He abandoned his car in the snow.')),
        want('He ', 'abandoned', ' his car in the snow.', 'a_______d', 7), 'abandoned');
     eq(VC.makeCloze(card('abandon', 'Abandon ship!')), want('', 'Abandon', ' ship!', 'A_____n', 5), 'at the start, case kept');
-    eq(VC.makeCloze(card('give up', 'She is giving up.')), want('She is ', 'giving up', '.', 'g____g u_', 5), 'phrase');
+    eq(VC.makeCloze(card('give up', 'She is giving up.')), null, 'a phrase is not asked (v3)');
     eq(VC.makeCloze(card('ox', 'An ox.')), want('An ', 'ox', '.', 'o_', 1), '2-letter word');
     eq(VC.makeCloze(card('cat', 'A category and a cat.')).before, 'A category and a ', 'whole words only');
     eq(VC.makeCloze(card('abandon', 'Abandon it? He abandoned it.')).before, '', 'first occurrence');
     eq(VC.makeCloze(card('give up', 'He gave up.')), null, 'irregular form → null');
     eq(VC.makeCloze(card('abandon', '')), null, 'no example');
     eq(VC.makeCloze(card('abandon', 'He left his car.')), null, 'word not in the example');
-    eq(VC.makeCloze(card('x y', 'Plot x y here.')), null, 'nothing to hide → null');
+    eq(VC.makeCloze(card('x-y', 'Plot x-y here.')), null, 'nothing to hide → null');
     const c = card('well-being', 'Sleep is good for your well-being.');
     const z = VC.makeCloze(c);
     eq(z && z.before + z.answer + z.after, c.example, 'before + answer + after = example');
@@ -850,8 +1032,9 @@
     x = cz('abandon', 'They abandoned the plan, but we did not abandon ours.');
     eq([x.answer, x.beforeMasked, x.afterMasked], ['abandon', 'They a_______d the plan, but we did not ', ' ours.'],
        'the word itself is asked; the earlier abandoned is masked');
-    x = cz('give up', 'Never give up, and never let others give up.');
-    eq(x.afterMasked, ', and never let others g__e u_.', 'a phrase twice');
+    x = cz('well-being', 'Your well-being matters, so protect your well-being.');
+    eq([x.answer, x.afterMasked], ['well-being', ' matters, so protect your w__l-b___g.'], 'a hyphenated word twice');
+    eq(cz('give up', 'Never give up, and never let others give up.'), null, 'a phrase is not asked (v3)');
     x = cz('let', 'She wrote a letter and let me read it.');
     eq([x.answer, x.before + x.answer + x.after], ['let', 'She wrote a letter and let me read it.'], 'let, not letter (F5)');
   });
@@ -1232,7 +1415,7 @@
 
   test('buildQuiz: spell', () => {
     const qs = VC.buildQuiz(deckCards, 'spell', 0, RNG(2));
-    eq(qs.map(q => q.cardId).sort(), ['c1', 'c2', 'c3', 'c6', 'c7'], 'only cards whose example contains the word');
+    eq(qs.map(q => q.cardId).sort(), ['c1', 'c2', 'c3', 'c7'], 'only single words whose example contains them (c6 is a phrase)');
     qs.forEach(q => {
       eq(Object.keys(q).sort(), ['cardId', 'cloze', 'hint', 'mode'], 'shape');
       eq(q.mode, 'spell', 'mode');
@@ -1241,13 +1424,13 @@
     const of = id => qs.filter(q => q.cardId === id)[0];
     eq(of('c1').hint, '他把車丟在雪地裡。', 'hint = exampleZh');
     eq(of('c3').hint, 'adj. 缺席的', 'no exampleZh → hint = meaning');
-    eq(of('c6').cloze.answer, 'giving up', 'phrase answer');
+    eq(of('c6'), undefined, 'no phrase question (v3)');
     eq(VC.buildQuiz(deckCards, 'spell', 2, RNG(1)).length, 2, 'count 2');
-    eq(VC.buildQuiz(deckCards, 'spell', 10, RNG(1)).length, 5, 'count > eligible → all eligible');
+    eq(VC.buildQuiz(deckCards, 'spell', 10, RNG(1)).length, 4, 'count > eligible → all eligible');
     let bad = null;
     for (let s = 0; s < 30 && !bad; s++) {
-      const n = VC.buildQuiz(deckCards, 'spell', 4, RNG(s)).length;
-      if (n !== 4) bad = s + ': ' + n;
+      const n = VC.buildQuiz(deckCards, 'spell', 3, RNG(s)).length;
+      if (n !== 3) bad = s + ': ' + n;
     }
     ok(!bad, 'skipped cards do not shrink the quiz', bad);
   });
@@ -1256,7 +1439,7 @@
     throws(() => VC.buildQuiz(deckCards, 'study', 10, RNG(1)), 'unknown mode');
     eq(VC.buildQuiz([], 'choice', 10, RNG(1)), [], 'no cards');
     eq(VC.buildQuiz(null, 'spell', 10, RNG(1)), [], 'null cards');
-    eq(VC.buildQuiz(deckCards.concat([null, undefined]), 'spell', 0, RNG(1)).length, 5, 'holes skipped');
+    eq(VC.buildQuiz(deckCards.concat([null, undefined]), 'spell', 0, RNG(1)).length, 4, 'holes skipped');
     eq(VC.buildQuiz(deckCards, 'choice', '3', RNG(1)).length, 3, 'count as a string');
     eq(VC.buildQuiz(deckCards, 'choice', undefined, RNG(1)).length, 7, 'no count = all');
     eq(VC.buildQuiz(deckCards, 'choice', -2, RNG(1)).length, 7, 'negative count = all');
@@ -1269,7 +1452,7 @@
   });
 
   test('quizEligible', () => {
-    eq(VC.quizEligible(deckCards), { choice: 7, spell: 5 }, 'deck');
+    eq(VC.quizEligible(deckCards), { choice: 7, spell: 4 }, 'deck (the phrase c6 is not spelt)');
     eq(VC.quizEligible([]), { choice: 0, spell: 0 }, 'empty');
     eq(VC.quizEligible(null), { choice: 0, spell: 0 }, 'null');
     eq(VC.quizEligible(tiny), { choice: 0, spell: 0 }, 'one distinct meaning, no examples');
@@ -1287,6 +1470,58 @@
     ok(!bad, 'quizEligible = what buildQuiz(…, 0) makes', bad);
   });
 
+  test('no phrases in 拼字題: makeCloze / buildQuiz / quizEligible (v3)', () => {
+    const cz = (word, example) => { const z = VC.makeCloze({ word, example }); return z && z.answer; };
+    eq(cz('give up', 'She is giving up.'), null, 'give up');
+    eq(cz('look forward to + V-ing', "I'm looking forward to seeing you."), null, 'look forward to + V-ing');
+    eq(cz('remind sb of sth', 'This song reminds me of home.'), null, 'remind sb of sth (only "reminds" was asked before)');
+    eq(cz('be accustomed to', 'We are accustomed to it.'), null, 'a be-phrase');
+    eq(cz('be born', 'He was born in Tainan.'), null, 'be + one word');
+    eq(cz('by oneself', 'He did it by himself.'), null, 'by oneself');
+    eq(cz('ice cream', 'I like ice cream.'), null, 'a compound noun with a space');
+    // Highlighting still finds phrases (findHeadwords is unchanged).
+    eq(VC.findHeadword('She is giving up.', 'give up'), { index: 7, text: 'giving up' }, 'findHeadword still finds a phrase');
+    eq(VC.findHeadword('This song reminds me of home.', 'remind sb of sth'), { index: 10, text: 'reminds' }, '… and a stand-in phrase');
+    // Single words are asked as before.
+    eq(cz('well-being', 'Sleep is good for your well-being.'), 'well-being', 'hyphen');
+    eq(cz("o'clock", "It is five o'clock."), "o'clock", 'apostrophe');
+    eq(cz('o’clock', "It is five o'clock."), "o'clock", 'curly apostrophe in the word');
+    eq(cz('abandon sth', 'He abandoned the plan.'), 'abandoned', 'a stand-in after one word');
+    eq(cz('abandon sb/sth', 'He abandoned the plan.'), 'abandoned', 'sb/sth after one word');
+    eq(cz('abandon (v.)', 'He abandoned the plan.'), 'abandoned', 'a part of speech in brackets');
+    eq(cz('color / colour', 'What colour is it?'), null, 'only the first alternative is looked for (as before)');
+    eq(cz('color / colour', 'What color is it?'), 'color', 'the first alternative');
+    eq(cz('tell someone', 'Tell him the truth.'), 'Tell', 'someone after a word is a stand-in');
+    // A word in brackets that the sentence may add is not asked with it: the answer is always one word.
+    eq(cz('abandon (oneself)', 'They abandoned the plan.'), 'abandoned', 'an optional word that is not there');
+    eq(cz('abandon (oneself)', 'He abandoned himself to despair.'), null, 'an optional word that is there → not asked');
+    const both = VC.makeCloze({ word: 'abandon (oneself)', example: 'He abandoned himself to grief, then abandoned the plan.' });
+    eq(both && both.answer, 'abandoned', 'the one-word occurrence is asked');
+    eq(both && both.before + both.answer + both.after, 'He abandoned himself to grief, then abandoned the plan.', 'before + answer + after = example');
+
+    const cards = [
+      C('p1', 'abandon', 'v. 放棄', { example: 'He abandoned his car.' }),
+      C('p2', 'give up', 'phr. 放棄', { example: 'Never give up.' }),
+      C('p3', 'look forward to', 'phr. 期待', { example: 'I look forward to it.' }),
+      C('p4', 'well-being', 'n. 幸福', { example: 'Sleep helps your well-being.' }),
+      C('p5', "o'clock", 'adv. …點鐘', { example: "It's ten o'clock." }),
+      C('p6', 'remind sb of sth', 'phr. 使想起', { example: 'You remind me of my sister.' }),
+      C('p7', 'take care of', 'phr. 照顧', { example: 'She takes care of her dog.' }),
+      C('p8', 'achieve', 'v. 達成', { example: 'They achieved their goal.' }),
+    ];
+    eq(VC.quizEligible(cards), { choice: 8, spell: 4 }, 'phrases are still in 選擇題, not in 拼字題');
+    let bad = null;
+    for (let s = 0; s < 10 && !bad; s++) {
+      const qs = VC.buildQuiz(cards, 'spell', 0, RNG(s));
+      const ids = qs.map(q => q.cardId).sort().join();
+      if (ids !== 'p1,p4,p5,p8' || qs.some(q => /\s/.test(q.cloze.answer))) bad = s + ': ' + JSON.stringify(qs);
+    }
+    ok(!bad, 'buildQuiz spell: only the single words, never a phrase', bad);
+    eq(VC.buildQuiz(cards, 'spell', 10, RNG(3)).length, 4, 'a count above the single words → all of them');
+    eq(VC.buildQuiz(cards, 'choice', 0, RNG(3)).length, 8, '選擇題 keeps phrases');
+    eq(VC.quizEligible(cards.filter(c => VC.isPhrase(c.word))), { choice: 4, spell: 0 }, 'a deck of phrases: nothing to spell');
+  });
+
   test('quiz from an imported file (parse → newCard → buildQuiz)', () => {
     const r = parse([
       '#deck: Q',
@@ -1299,9 +1534,9 @@
     ].join('\n'));
     const cards = r.decks[0].cards.map((c, i) => VC.newCard(c, 'q', 0, 'q' + i, i));
     eq(cards.map(c => { const z = VC.makeCloze(c); return z && [z.answer, z.masked]; }), [
-      ['abandoned', 'a_______d'], ['looking forward to', 'l_____g f_____d t_'], ['efficiently', 'e_________y'],
-      ['consequences', 'c__________s'], null, ['well-being', 'w__l-b___g']], 'answers and masks');
-    eq(VC.quizEligible(cards), { choice: 6, spell: 5 }, 'eligible');
+      ['abandoned', 'a_______d'], null, ['efficiently', 'e_________y'],
+      ['consequences', 'c__________s'], null, ['well-being', 'w__l-b___g']], 'answers and masks (a phrase → null)');
+    eq(VC.quizEligible(cards), { choice: 6, spell: 4 }, 'eligible');
     const qs = VC.buildQuiz(cards, 'spell', 0, RNG(1));
     ok(qs.every(q => VC.checkSpelling(q.cloze.answer.toUpperCase() + '.', q.cloze.answer)), 'every answer accepted as typed');
   });
